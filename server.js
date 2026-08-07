@@ -5,8 +5,12 @@ import cookieParser from "cookie-parser";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import { readFileSync, existsSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { checkAndIncrement, getUsage, setTier } from "./store.js";
 import { PLANS } from "./plans.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 dotenv.config();
 
@@ -355,6 +359,13 @@ app.get("/api/admin/stats", requireAdmin, (req, res) => {
 });
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+// --- Фронтендди ушул эле серверден тейлейбиз (артифакт сандбоксунан качуу үчүн) ---
+app.use(express.static(path.join(__dirname, "public")));
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
