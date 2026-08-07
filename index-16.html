@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="ky">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Тундук — Кыргызча AI жардамчы</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700&family=Manrope:wght@400;500;600;700&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  html, body, #root { margin: 0; padding: 0; height: 100%; background: #14171F; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2A2F42; border-radius: 8px; }
+  textarea:focus, button:focus-visible { outline: 2px solid #E8B84B; outline-offset: 2px; }
+  @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  .dot { animation: pulse 1.2s infinite; }
+  .dot:nth-child(2) { animation-delay: 0.2s; }
+  .dot:nth-child(3) { animation-delay: 0.4s; }
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+const TundukMark = ({ size = 28 }) => (
+  <svg width={size} height={size} viewBox="0 0 100 100" fill="none">
+    <circle cx="50" cy="50" r="46" stroke="#E8B84B" strokeWidth="2" opacity="0.4" />
+    {[...Array(8)].map((_, i) => {
+      const angle = (i * 45 * Math.PI) / 180;
+      const x1 = 50 + 18 * Math.cos(angle);
+      const y1 = 50 + 18 * Math.sin(angle);
+      const x2 = 50 + 42 * Math.cos(angle);
+      const y2 = 50 + 42 * Math.sin(angle);
+      return (
+        <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#E8B84B" strokeWidth="2.5" strokeLinecap="round" />
+      );
+    })}
+    <circle cx="50" cy="50" r="10" fill="#C4402B" />
+    <circle cx="50" cy="50" r="10" stroke="#E8B84B" strokeWidth="2" />
+  </svg>
+);
+
+function App() {
+  const [messages, setMessages] = useState([
+    { role: "assistant", content: "Салам! Мен — Тундук, сиздин кыргызча AI жардамчыңыз. Эмне жөнүндө сүйлөшөбүз?" },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [mode, setMode] = useState("chat");
+  const [lyrics, setLyrics] = useState("");
+  const [videoStage, setVideoStage] = useState("");
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [videoProgress, setVideoProgress] = useState("");
+  const canvasRef = useRef(null);
+  const [usage, setUsage] = useState(null);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    scrollRef.current && scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, loading]);
+
+  const sendChat = async (text, newMessages) => {
+    const apiMessages = newMessages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: apiMessages }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (data.usage) setUsage(data.usage);
+      throw new Error(data.error || "Сервер катасы: " + response.status);
+    }
+
+    if (data.usage) setUsage(data.usage);
+    setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+  };
+
+  const sendImage = async (prompt) => {
+    const response = await fetch("/api/image", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (data.usage) setUsage(data.usage);
+      throw new Error(data.error || "Сервер катасы: " + response.status);
+    }
+
+    if (data.usage) setUsage(data.usage);
+    setMessages((prev) => [...prev, { role: "assistant", type: "image", content: data.dataUrl, caption: prompt }]);
+  };
+
+  function pickSupportedMimeType() {
+    const candidates = [
+      "video/mp4;codecs=h264",
+      "video/mp4",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+    ];
+    for (const type of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return null;
+  }
+
+  function wrapText(ctx, text, maxWidth) {
+    const words = text.split(" ");
+    const lines = [];
+    let line = "";
+    for (const w of words) {
+      const test = line ? line + " " + w : w;
+      if (ctx.measureText(test).width > maxWidth && line) {
+        lines.push(line);
+        line = w;
+      } else {
+        line = test;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  const generateVideo = async () => {
+    if (!lyrics.trim()) {
+      setError("Алгач ыр текстин жазыңыз.");
+      return;
+    }
+
+    setError(null);
+    setVideoUrl(null);
+    setVideoStage("scenes");
+    setVideoProgress("Ырды сахналарга бөлүп, сүрөттөрдү тартып жатам...");
+
+    try {
+      const response = await fetch("/api/video-scenes", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lyrics }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Сервер катасы: " + response.status);
+      if (data.usage) setUsage(data.usage);
+
+      const { scenes, secondsPerScene } = data;
+      if (!scenes || scenes.length === 0) throw new Error("Сахна алынган жок");
+
+      setVideoStage("rendering");
+      setVideoProgress("Видеого чогултуп жатам...");
+
+      const images = await Promise.all(
+        scenes.map(
+          (s) =>
+            new Promise((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = reject;
+              img.src = s.imageDataUrl;
+            })
+        )
+      );
+
+      const canvas = canvasRef.current;
+      canvas.width = 720;
+      canvas.height = 1280;
+      const ctx = canvas.getContext("2d");
+
+      const mimeType = pickSupportedMimeType();
+      if (!mimeType) throw new Error("Бул браузер видео жаза албайт");
+
+      const stream = canvas.captureStream(30);
+      const recorder = new MediaRecorder(stream, { mimeType });
+      const chunks = [];
+      recorder.ondataavailable = (e) => e.data.size > 0 && chunks.push(e.data);
+
+      const done = new Promise((resolve) => {
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: mimeType });
+          resolve(URL.createObjectURL(blob));
+        };
+      });
+
+      recorder.start();
+
+      for (let i = 0; i < images.length; i++) {
+        setVideoProgress(`Сахна ${i + 1}/${images.length} тартылып жатат...`);
+        const img = images[i];
+        const line = scenes[i].lyricLine || "";
+        const startTime = performance.now();
+        const durationMs = secondsPerScene * 1000;
+
+        while (performance.now() - startTime < durationMs) {
+          const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
+          const w = img.width * scale;
+          const h = img.height * scale;
+          const x = (canvas.width - w) / 2;
+          const y = (canvas.height - h) / 2;
+          ctx.drawImage(img, x, y, w, h);
+
+          ctx.font = "bold 40px sans-serif";
+          const maxWidth = canvas.width - 80;
+          const lines = wrapText(ctx, line, maxWidth);
+          const lineHeight = 52;
+          const boxHeight = lines.length * lineHeight + 40;
+          const boxY = canvas.height - boxHeight - 60;
+
+          ctx.fillStyle = "rgba(20, 23, 31, 0.72)";
+          ctx.fillRect(0, boxY, canvas.width, boxHeight);
+
+          ctx.fillStyle = "#F2EFE9";
+          ctx.textAlign = "center";
+          lines.forEach((ln, idx) => {
+            ctx.fillText(ln, canvas.width / 2, boxY + 44 + idx * lineHeight);
+          });
+
+          await new Promise((r) => setTimeout(r, 1000 / 30));
+        }
+      }
+
+      recorder.stop();
+      const url = await done;
+      setVideoUrl(url);
+      setVideoStage("done");
+      setVideoProgress("");
+    } catch (err) {
+      setError("Видео катасы: " + err.message);
+      setVideoStage("");
+      setVideoProgress("");
+    }
+  };
+
+  const sendMessage = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+
+    const newMessages = [...messages, { role: "user", content: text }];
+    setMessages(newMessages);
+    setInput("");
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (mode === "image") {
+        await sendImage(text);
+      } else {
+        await sendChat(text, newMessages);
+      }
+    } catch (err) {
+      setError("Ката кетти: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#14171F", fontFamily: "'Manrope', system-ui, sans-serif", color: "#F2EFE9" }}>
+      <div style={{ borderBottom: "1px solid #23283A", background: "#171B27" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <TundukMark size={30} />
+            <div>
+              <div style={{ fontFamily: "'Unbounded', sans-serif", fontSize: 16, fontWeight: 700, letterSpacing: "0.01em" }}>ТУНДУК</div>
+              <div style={{ fontSize: 11, color: "#8A90A6", marginTop: 2 }}>
+                {mode === "chat" ? "Интернетти издейт" : mode === "image" ? "Сүрөт тартат" : "Видео чогултат"}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={() => setMode("chat")} style={{ background: mode === "chat" ? "#C4402B" : "transparent", color: mode === "chat" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "chat" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>💬 Чат</button>
+            <button onClick={() => setMode("image")} style={{ background: mode === "image" ? "#C4402B" : "transparent", color: mode === "image" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "image" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎨 Сүрөт</button>
+            <button onClick={() => setMode("video")} style={{ background: mode === "video" ? "#C4402B" : "transparent", color: mode === "video" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "video" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎬 Видео</button>
+          </div>
+        </div>
+
+        {usage && (
+          <div style={{ padding: "0 20px 12px", display: "flex", justifyContent: "flex-end" }}>
+            <div style={{ fontSize: 11, color: "#8A90A6" }}>
+              {mode === "chat"
+                ? `Чат: ${usage.used ?? (usage.chat && usage.chat.used) ?? 0}/${usage.limit ?? (usage.chat && usage.chat.limit) ?? "?"}`
+                : `Сүрөт: ${usage.used ?? (usage.images && usage.images.used) ?? 0}/${usage.limit ?? (usage.images && usage.images.limit) ?? "?"}`}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {mode === "video" ? (
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontSize: 13, color: "#8A90A6", lineHeight: 1.5 }}>
+            Ыр текстин жазыңыз — бот аны 6 сахнага бөлүп, ар бирине сүрөт тартып, жок дегенде 3 мүнөттүк слайдшоу-видео чогултат (телефонго жүктөп алса болот).
+          </div>
+
+          <textarea value={lyrics} onChange={(e) => setLyrics(e.target.value)} placeholder="Ырдын текстин ушул жерге жазыңыз..." rows={6} style={{ background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "12px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", resize: "vertical" }} />
+
+          <button onClick={generateVideo} disabled={videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim()} style={{ background: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "default" : "pointer" }}>
+            {videoStage ? "Иштеп жатам..." : "🎬 Видео жаса"}
+          </button>
+
+          {videoProgress && <div style={{ fontSize: 12.5, color: "#E8B84B" }}>{videoProgress}</div>}
+
+          <canvas ref={canvasRef} style={{ display: "none" }} />
+
+          {videoUrl && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <video src={videoUrl} controls playsInline style={{ width: "100%", borderRadius: 12, background: "#000" }} />
+              <a href={videoUrl} download="tunduk-video.mp4" style={{ textAlign: "center", background: "#2A2F42", color: "#F2EFE9", padding: "10px", borderRadius: 10, fontSize: 13.5, textDecoration: "none" }}>⬇️ Видеону телефонго сактоо</a>
+            </div>
+          )}
+
+          {error && <div style={{ color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
+        </div>
+      ) : (
+        <>
+          <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "24px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+            {messages.map((m, i) =>
+              m.type === "image" ? (
+                <div key={i} style={{ alignSelf: "flex-start", maxWidth: "78%", background: "#1E2230", borderRadius: "16px 16px 16px 4px", overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
+                  <img src={m.content} alt={m.caption} style={{ width: "100%", display: "block" }} />
+                  <div style={{ padding: "8px 12px", fontSize: 12, color: "#8A90A6" }}>{m.caption}</div>
+                </div>
+              ) : (
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
+                  {m.content}
+                </div>
+              )
+            )}
+
+            {loading && (
+              <div style={{ alignSelf: "flex-start", background: "#1E2230", padding: "13px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 5 }}>
+                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+              </div>
+            )}
+
+            {error && <div style={{ alignSelf: "center", color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
+          </div>
+
+          <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
+            <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
+            <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
