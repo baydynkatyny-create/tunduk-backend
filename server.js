@@ -25,8 +25,17 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
+// ЭСКЕРТҮҮ: cookie (credentials:true) менен иштегенде браузерлер "*" originду
+// кабыл албайт — так сурам жиберген originду кайтарышыбыз керек.
+// ALLOWED_ORIGIN белгилүү бир доменге орнотулса, ошол гана уруксат берилет;
+// "*" (демейки) болсо, кайсы origin сураса, ошону динамикалык түрдө кайтарабыз.
 const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
-app.use(cors({ origin: allowedOrigin, credentials: true }));
+app.use(
+  cors({
+    origin: allowedOrigin === "*" ? true : allowedOrigin,
+    credentials: true,
+  })
+);
 
 // IP-негизделген коргоо — экинчи катмар, cookie тазаланса дагы толук чектелбесин үчүн
 const ipGuard = rateLimit({
@@ -351,4 +360,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Тундук сервери ${port}-портто иштеп жатат`);
 });
-    
