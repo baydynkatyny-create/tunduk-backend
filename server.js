@@ -11,7 +11,7 @@ import { PLANS } from "./plans.js";
 dotenv.config();
 
 // --- Керектүү ачкычтар барбы, серверди баштаардан текшеребиз ---
-const REQUIRED_ENV = ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "ADMIN_KEY"];
+const REQUIRED_ENV = ["GEMINI_API_KEY", "ADMIN_KEY"];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length > 0) {
   console.error(
@@ -77,33 +77,41 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "messages талаасы керек" });
     }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1500,
-        system: SYSTEM_PROMPT,
-        messages,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-      }),
-    });
+    // Gemini чат-тарых форматына айландырабыз: { role, parts:[{text}] }
+    // Gemini "system" ролун колдоого албайт, ошондуктан system prompt'ту
+    // systemInstruction талаасы аркылуу өзүнчө жиберебиз.
+    const geminiContents = messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: geminiContents,
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          generationConfig: { maxOutputTokens: 1500 },
+        }),
+      }
+    );
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error("Anthropic error:", errText);
+      console.error("Gemini error:", errText);
       return res.status(502).json({ error: "AI кызматы жооп берген жок" });
     }
 
     const data = await response.json();
     const reply =
-      data.content
-        ?.filter((c) => c.type === "text")
-        .map((c) => c.text)
+      data.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
         .join("\n\n") || "Кечиресиз, жооп ала алган жокмун.";
 
     res.json({ reply, usage: check });
@@ -224,26 +232,30 @@ app.post("/api/video-scenes", async (req, res) => {
       });
     }
 
-    // 1-кадам: Claude ырды 6 сахнага бөлөт, ар бирине сүрөт-промпт жазат
-    const planResp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1200,
-        system:
-          "Сен видео-сахна жасоочу жардамчысың. Сага ыр тексти берилет. Аны так 6 сахнага бөлүп, ар бир сахна үчүн (1) ошол сахнага тиешелүү ырдын саптарын жана (2) ошол сапка дал келген сүрөт үчүн англисче, визуалдык, кыска сүрөт-промпт жаз (стиль: cinematic, warm lighting). ЖАЛГЫЗ JSON массив кайтар, эч кандай башка текст, түшүндүрмө же ```` белгилери болбосун. Формат: [{\"lyricLine\": \"...\", \"imagePrompt\": \"...\"}, ...] — так 6 элемент.",
-        messages: [{ role: "user", content: lyrics }],
-      }),
-    });
+    // 1-кадам: Gemini ырды 6 сахнага бөлөт, ар бирине сүрөт-промпт жазат
+    const scenePromptInstruction =
+      "Сен видео-сахна жасоочу жардамчысың. Сага ыр тексти берилет. Аны так 6 сахнага бөлүп, ар бир сахна үчүн (1) ошол сахнага тиешелүү ырдын саптарын жана (2) ошол сапка дал келген сүрөт үчүн англисче, визуалдык, кыска сүрөт-промпт жаз (стиль: cinematic, warm lighting). ЖАЛГЫЗ JSON массив кайтар, эч кандай башка текст, түшүндүрмө же ```` белгилери болбосун. Формат: [{\"lyricLine\": \"...\", \"imagePrompt\": \"...\"}, ...] — так 6 элемент.";
 
-    if (!planResp.ok) throw new Error("Claude сахна-планы катасы: " + planResp.status);
+    const planResp = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: lyrics }] }],
+          systemInstruction: { parts: [{ text: scenePromptInstruction }] },
+          generationConfig: { maxOutputTokens: 1200 },
+        }),
+      }
+    );
+
+    if (!planResp.ok) throw new Error("Gemini сахна-планы катасы: " + planResp.status);
     const planData = await planResp.json();
-    const planText = planData.content?.find((c) => c.type === "text")?.text || "[]";
+    const planText =
+      planData.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text || "[]";
 
     let scenePlan;
     try {
@@ -339,3 +351,4 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Тундук сервери ${port}-портто иштеп жатат`);
 });
+    
