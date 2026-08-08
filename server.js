@@ -14,7 +14,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 dotenv.config();
 
-// --- Керектүү ачкычтар барбы, серверди баштаардан текшеребиз ---
 const REQUIRED_ENV = ["GEMINI_API_KEY", "ADMIN_KEY"];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length > 0) {
@@ -29,10 +28,6 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
-// ЭСКЕРТҮҮ: cookie (credentials:true) менен иштегенде браузерлер "*" originду
-// кабыл албайт — так сурам жиберген originду кайтарышыбыз керек.
-// ALLOWED_ORIGIN белгилүү бир доменге орнотулса, ошол гана уруксат берилет;
-// "*" (демейки) болсо, кайсы origin сураса, ошону динамикалык түрдө кайтарабыз.
 const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
 app.use(
   cors({
@@ -41,7 +36,6 @@ app.use(
   })
 );
 
-// IP-негизделген коргоо — экинчи катмар, cookie тазаланса дагы толук чектелбесин үчүн
 const ipGuard = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
@@ -50,20 +44,13 @@ const ipGuard = rateLimit({
 
 const SYSTEM_PROMPT = `Сен "Тундук" деген кыргызча AI жардамчысың. Сен ар дайым таза, табигый кыргыз тилинде жооп бересиң (орусча же англисче сөздөрдү аралаштырбай, зарыл болгон техникалык терминдерден башка). Сен сылык, так, пайдалуу жана достук маанайда жооп бересиң. Кыргыз маданиятын, каада-салтын жана контекстти жакшы билесиң. Жоопторуң кыска жана түшүнүктүү болсун, бирок толук маалымат бер.`;
 
-// --- Колдонуучу ID: сервер өзү түзөт жана "httpOnly" cookie'ге жазат ---
-// Мурун фронтенд (браузердеги JS) ID'ди өзү тандап, header аркылуу жиберчү —
-// бул ID'ди каалаган убакта алмаштырып, лимитти чексиз айланып өтүүгө болчу.
-// Эми ID'ди сервер өзү түзөт жана httpOnly cookie катары сактайт —
-// браузердеги JS ага тийе албайт, андыктан аны консолдон "тазалап" жаңыртуу мүмкүн эмес.
-// (Толук коргоо үчүн келечекте телефон/SMS аркылуу каттоо кошулушу керек —
-// cookie'ни толугу менен тазалоо дагы эле мүмкүн, бирок бул кадимки колдонуучу үчүн тоскоол болот.)
 function identifyUser(req, res, next) {
   let userId = req.cookies?.tunduk_uid;
   if (!userId) {
     userId = crypto.randomUUID();
     res.cookie("tunduk_uid", userId, {
       httpOnly: true,
-      maxAge: 400 * 24 * 60 * 60 * 1000, // ~400 күн — браузерлердин cookie чегине ылайык
+      maxAge: 400 * 24 * 60 * 60 * 1000,
       sameSite: "lax",
     });
   }
@@ -74,7 +61,6 @@ function identifyUser(req, res, next) {
 app.use(ipGuard);
 app.use(identifyUser);
 
-// --- Чат эндпоинти ---
 app.post("/api/chat", async (req, res) => {
   try {
     const check = checkAndIncrement(req.userId, "chat");
@@ -90,16 +76,13 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "messages талаасы керек" });
     }
 
-    // Gemini чат-тарых форматына айландырабыз: { role, parts:[{text}] }
-    // Gemini "system" ролун колдоого албайт, ошондуктан system prompt'ту
-    // systemInstruction талаасы аркылуу өзүнчө жиберебиз.
     const geminiContents = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: m.content }],
     }));
 
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
       {
         method: "POST",
         headers: {
@@ -134,7 +117,6 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// --- Жөнөкөй мазмун чыпкасы: бул толук moderation эмес, биринчи коргоо катмары гана ---
 const BLOCKED_PATTERNS = [
   /\bжалаӊач\b/i,
   /\bпорно\b/i,
@@ -150,7 +132,6 @@ function isBlockedPrompt(text) {
   return BLOCKED_PATTERNS.some((re) => re.test(text));
 }
 
-// --- Сүрөт эндпоинти ---
 app.post("/api/image", async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -171,7 +152,7 @@ app.post("/api/image", async (req, res) => {
     }
 
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent",
       {
         method: "POST",
         headers: {
@@ -205,10 +186,9 @@ app.post("/api/image", async (req, res) => {
   }
 });
 
-// --- Gemini аркылуу бир сүрөт жаратуучу жардамчы функция (видео сахналары үчүн) ---
 async function generateImageDataUrl(prompt) {
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent",
     {
       method: "POST",
       headers: {
@@ -225,8 +205,6 @@ async function generateImageDataUrl(prompt) {
   return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
 }
 
-// --- Видео сахналары: ырды сахналарга бөлүп, ар бирине сүрөт тартат ---
-// Клиент (браузер) бул сахналарды алып, canvas+MediaRecorder менен видеого айландырат.
 app.post("/api/video-scenes", async (req, res) => {
   try {
     const { lyrics } = req.body;
@@ -245,12 +223,11 @@ app.post("/api/video-scenes", async (req, res) => {
       });
     }
 
-    // 1-кадам: Gemini ырды 6 сахнага бөлөт, ар бирине сүрөт-промпт жазат
     const scenePromptInstruction =
       "Сен видео-сахна жасоочу жардамчысың. Сага ыр тексти берилет. Аны так 6 сахнага бөлүп, ар бир сахна үчүн (1) ошол сахнага тиешелүү ырдын саптарын жана (2) ошол сапка дал келген сүрөт үчүн англисче, визуалдык, кыска сүрөт-промпт жаз (стиль: cinematic, warm lighting). ЖАЛГЫЗ JSON массив кайтар, эч кандай башка текст, түшүндүрмө же ```` белгилери болбосун. Формат: [{\"lyricLine\": \"...\", \"imagePrompt\": \"...\"}, ...] — так 6 элемент.";
 
     const planResp = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
       {
         method: "POST",
         headers: {
@@ -282,7 +259,6 @@ app.post("/api/video-scenes", async (req, res) => {
       throw new Error("Сахна планы бош келди");
     }
 
-    // 2-кадам: ар бир сахнага сүрөт тартабыз (кезек менен — Gemini'ди чогуу чакырбайбыз)
     const scenes = [];
     for (const scene of scenePlan.slice(0, 8)) {
       try {
@@ -290,7 +266,6 @@ app.post("/api/video-scenes", async (req, res) => {
         scenes.push({ lyricLine: scene.lyricLine, imageDataUrl });
       } catch (e) {
         console.error("Сахна сүрөтү катасы:", e.message);
-        // Бир сахна ишке ашпай калса — өткөрүп жиберебиз, баары токтоп калбашы үчүн
       }
     }
 
@@ -307,12 +282,10 @@ app.post("/api/video-scenes", async (req, res) => {
   }
 });
 
-// --- Колдонуучунун өз лимитин көрүшү үчүн ---
 app.get("/api/usage", (req, res) => {
   res.json(getUsage(req.userId));
 });
 
-// --- Кийин төлөм webhook'у ушул жерди чакырат (азырынча кол менен тестирлөө үчүн) ---
 app.post("/api/upgrade", (req, res) => {
   const { tier } = req.body;
   const plan = PLANS[tier];
@@ -321,7 +294,6 @@ app.post("/api/upgrade", (req, res) => {
   res.json({ ok: true, user });
 });
 
-// --- АДМИН: канча адам колдонуп жатканын көрүү ---
 function requireAdmin(req, res, next) {
   const key = req.header("x-admin-key");
   if (!process.env.ADMIN_KEY || key !== process.env.ADMIN_KEY) {
@@ -360,7 +332,6 @@ app.get("/api/admin/stats", requireAdmin, (req, res) => {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// --- Фронтендди ушул эле серверден тейлейбиз (артифакт сандбоксунан качуу үчүн) ---
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api/")) return next();
