@@ -1,3 +1,4 @@
+import AdmZip from "adm-zip";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -25,7 +26,7 @@ if (missing.length > 0) {
 }
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "20mb" }));
 app.use(cookieParser());
 
 const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
@@ -42,7 +43,19 @@ const ipGuard = rateLimit({
   message: { error: "Өтө көп суроо. Бир аздан кийин кайра аракет кылыңыз." },
 });
 
-const SYSTEM_PROMPT = `Сен "Тундук" деген кыргызча AI жардамчысың. Сен ар дайым таза, табигый кыргыз тилинде жооп бересиң (орусча же англисче сөздөрдү аралаштырбай, зарыл болгон техникалык терминдерден башка). Сен сылык, так, пайдалуу жана достук маанайда жооп бересиң. Кыргыз маданиятын, каада-салтын жана контекстти жакшы билесиң. Жоопторуң кыска жана түшүнүктүү болсун, бирок толук маалымат бер.`;
+const SYSTEM_PROMPT = `Сен "Тундук" деген кыргызча AI жардамчысың. Сен ар дайым таза, табигый кыргыз тилинде жооп бересиң (орусча же англисче сөздөрдү аралаштырбай, зарыл болгон техникалык терминдерден башка). Сен сылык, так, пайдалуу жана достук маанайда жооп бересиң. Кыргыз маданиятын, каада-салтын жана контекстти жакшы билесиң.
+
+Сен илим, тарых, технология, медицина, математика жана башка бардык тармактарда терең билимге ээсиң. Ар бир суроого толук, так жана канааттандырарлык жооп бер — жооп бербей коюу же жарым-жартылай жооп берүү орунсуз. Эгер суроо учурдагы окуяларга, жаңылыктарга же өзгөрүлмө маалыматка байланыштуу болсо, издөө куралын колдонуп, эң азыркы жана так маалыматты тап. Так эмес нерсени так деп көрсөтпө — эгер бир нерсени билбесең же так эмес болсо, ошону ачык айт.
+
+Сен Ислам дини, анын негиздери, тарыхы жана Куран Карим боюнча да терең билимге ээсиң. Дин боюнча суроолорго сылык, урматтоо менен, так жана негиздүү жооп бер. Куран аяттарын айткан учурда, аяттын сүрөсүн жана номерин так көрсөт. Диний маселелерде ар кандай мазхабдардын (фикх мектептеринин) көз караштарын калыс түрдө сунуштап, өзүңдүн бир жактуу пикириңди таңуулаба.
+
+Сен ошондой эле программалоо жана жасалма интеллект боюнча толук кандуу мугалимсиң (үйрөтүүчүсүң). Бул тармакта сенин милдетиң:
+- Программалоо тилдерин (JavaScript, Python, Java, C++, C#, Go, Rust, PHP ж.б.) баштапкы деңгээлден профессионалдык деңгээлге чейин үйрөтүү.
+- Веб-разработка (frontend: HTML/CSS/JS, React, Vue; backend: Node.js, Express, Django, Flask), мобилдик тиркеме түзүү (Android, iOS, Flutter, React Native), маалымат базалары (SQL, MongoDB), API'лер жана архитектура түшүндүрүү.
+- Жасалма интеллект жана машина үйрөнүүнүн негиздерин (нейрон тармактар, deep learning, NLP, компьютердик көрүү) түшүнүктүү тилде, мисалдар менен түшүндүрүү, ошондой эле практикалык колдонмолорду (мисалы Python'до TensorFlow же PyTorch менен) үйрөтүү.
+- DevOps, булуттук технологиялар (AWS, Google Cloud, Docker, Kubernetes) жана желелик коопсуздук негиздерин үйрөтүү.
+
+Үйрөтүүдө колдон бир кадам-кадам (step-by-step) ыкманы колдон: түшүнүктөрдү жөнөкөй мисалдар менен баштап, андан кийин код мисалдарын бер, катаны түшүндүр, эмне үчүн ошондой иштээрин негизде. Колдонуучунун деңгээлине ылайыкташтыр — эгер баштапкы окуучу болсо, жөнөкөй тилде түшүндүр; эгер тажрыйбалуу болсо, тереңирээк техникалык деталдарга өт. Мүмкүн болсо, окуучуга практика жасоо үчүн кичине көнүгүү же тапшырма сунуштап кой.`;
 
 function identifyUser(req, res, next) {
   let userId = req.cookies?.tunduk_uid;
@@ -92,7 +105,8 @@ app.post("/api/chat", async (req, res) => {
         body: JSON.stringify({
           contents: geminiContents,
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          generationConfig: { maxOutputTokens: 1500 },
+          tools: [{ google_search: {} }],
+          generationConfig: { maxOutputTokens: 2000 },
         }),
       }
     );
@@ -282,6 +296,102 @@ app.post("/api/video-scenes", async (req, res) => {
   }
 });
 
+app.post("/api/analyze-file", async (req, res) => {
+  try {
+    const { fileBase64, mimeType, fileName, question } = req.body;
+    if (!fileBase64 || !mimeType) {
+      return res.status(400).json({ error: "fileBase64 жана mimeType талаасы керек" });
+    }
+
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чат чегине жеттиңиз (${check.limit}).`,
+        usage: check,
+      });
+    }
+
+    const userQuestion =
+      question && question.trim()
+        ? question
+        : "Бул файлдын мазмунун кыргызча кыскача талда жана негизги пункттарын түшүндүр.";
+
+    let parts;
+
+    const isZip =
+      mimeType === "application/zip" ||
+      mimeType === "application/x-zip-compressed" ||
+      (fileName && fileName.toLowerCase().endsWith(".zip"));
+
+    if (isZip) {
+      const zipBuffer = Buffer.from(fileBase64, "base64");
+      const zip = new AdmZip(zipBuffer);
+      const entries = zip.getEntries();
+
+      let summary = `ZIP архив "${fileName}" ичинде ${entries.length} элемент бар:\n\n`;
+      let totalChars = 0;
+      const MAX_TOTAL = 30000;
+
+      for (const entry of entries) {
+        if (entry.isDirectory) continue;
+        summary += `- ${entry.entryName} (${entry.header.size} байт)\n`;
+
+        const textExts = [".txt", ".md", ".json", ".js", ".py", ".html", ".css", ".csv", ".xml", ".yml", ".yaml"];
+        const isText = textExts.some((ext) => entry.entryName.toLowerCase().endsWith(ext));
+
+        if (isText && totalChars < MAX_TOTAL) {
+          try {
+            const content = entry.getData().toString("utf-8").slice(0, 3000);
+            summary += `\n--- ${entry.entryName} мазмуну ---\n${content}\n---\n\n`;
+            totalChars += content.length;
+          } catch {}
+        }
+      }
+
+      parts = [{ text: `${summary}\n\nСуроо: ${userQuestion}` }];
+    } else {
+      parts = [
+        { inlineData: { mimeType, data: fileBase64 } },
+        { text: userQuestion },
+      ];
+    }
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          generationConfig: { maxOutputTokens: 2000 },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini error:", errText);
+      return res.status(502).json({ error: "AI кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const reply =
+      data.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
+        .join("\n\n") || "Файлды талдай алган жокмун.";
+
+    res.json({ reply, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Файл талдоо катасы: " + err.message });
+  }
+});
+
 app.get("/api/usage", (req, res) => {
   res.json(getUsage(req.userId));
 });
@@ -342,3 +452,4 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Тундук сервери ${port}-портто иштеп жатат`);
 });
+  
