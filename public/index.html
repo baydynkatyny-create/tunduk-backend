@@ -49,9 +49,15 @@ const TundukMark = ({ size = 28 }) => (
 );
 
 function App() {
-  const [messages, setMessages] = useState([
-    { role: "assistant", content: "Салам! Мен — Тундук, сиздин кыргызча AI жардамчыңыз. Эмне жөнүндө сүйлөшөбүз?" },
-  ]);
+  const [conversations, setConversations] = useState(() => {
+    try {
+      const saved = localStorage.getItem("tunduk_conversations");
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+  const [currentId, setCurrentId] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -64,9 +70,75 @@ function App() {
   const [usage, setUsage] = useState(null);
   const scrollRef = useRef(null);
 
+  const defaultGreeting = { role: "assistant", content: "Салам! Мен — Тундук, сиздин кыргызча AI жардамчыңыз. Эмне жөнүндө сүйлөшөбүз?" };
+
+  useEffect(() => {
+    if (conversations.length === 0) {
+      const newConv = { id: Date.now().toString(), title: "Жаңы сүйлөшүү", messages: [defaultGreeting], createdAt: Date.now() };
+      setConversations([newConv]);
+      setCurrentId(newConv.id);
+    } else if (!currentId) {
+      setCurrentId(conversations[0].id);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (conversations.length > 0) {
+      try {
+        localStorage.setItem("tunduk_conversations", JSON.stringify(conversations));
+      } catch {}
+    }
+  }, [conversations]);
+
+  const currentConv = conversations.find((c) => c.id === currentId) || conversations[0];
+  const messages = currentConv ? currentConv.messages : [defaultGreeting];
+
   useEffect(() => {
     scrollRef.current && scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
+
+  const updateMessages = (newMessages) => {
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id !== currentId) return c;
+        let title = c.title;
+        if (title === "Жаңы сүйлөшүү") {
+          const firstUser = newMessages.find((m) => m.role === "user");
+          if (firstUser) title = firstUser.content.slice(0, 34) + (firstUser.content.length > 34 ? "..." : "");
+        }
+        return { ...c, messages: newMessages, title };
+      })
+    );
+  };
+
+  const startNewChat = () => {
+    const newConv = { id: Date.now().toString(), title: "Жаңы сүйлөшүү", messages: [defaultGreeting], createdAt: Date.now() };
+    setConversations((prev) => [newConv, ...prev]);
+    setCurrentId(newConv.id);
+    setSidebarOpen(false);
+    setError(null);
+    setMode("chat");
+  };
+
+  const switchConversation = (id) => {
+    setCurrentId(id);
+    setSidebarOpen(false);
+    setError(null);
+  };
+
+  const deleteConversation = (id, e) => {
+    e.stopPropagation();
+    setConversations((prev) => {
+      const filtered = prev.filter((c) => c.id !== id);
+      if (filtered.length === 0) {
+        const newConv = { id: Date.now().toString(), title: "Жаңы сүйлөшүү", messages: [defaultGreeting], createdAt: Date.now() };
+        setCurrentId(newConv.id);
+        return [newConv];
+      }
+      if (id === currentId) setCurrentId(filtered[0].id);
+      return filtered;
+    });
+  };
 
   const sendChat = async (text, newMessages) => {
     const apiMessages = newMessages
@@ -87,10 +159,10 @@ function App() {
     }
 
     if (data.usage) setUsage(data.usage);
-    setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+    updateMessages([...newMessages, { role: "assistant", content: data.reply }]);
   };
 
-  const sendImage = async (prompt) => {
+  const sendImage = async (prompt, newMessages) => {
     const response = await fetch("/api/image", {
       method: "POST",
       credentials: "include",
@@ -105,7 +177,7 @@ function App() {
     }
 
     if (data.usage) setUsage(data.usage);
-    setMessages((prev) => [...prev, { role: "assistant", type: "image", content: data.dataUrl, caption: prompt }]);
+    updateMessages([...newMessages, { role: "assistant", type: "image", content: data.dataUrl, caption: prompt }]);
   };
 
   function pickSupportedMimeType() {
@@ -253,14 +325,14 @@ function App() {
     if (!text || loading) return;
 
     const newMessages = [...messages, { role: "user", content: text }];
-    setMessages(newMessages);
+    updateMessages(newMessages);
     setInput("");
     setLoading(true);
     setError(null);
 
     try {
       if (mode === "image") {
-        await sendImage(text);
+        await sendImage(text, newMessages);
       } else {
         await sendChat(text, newMessages);
       }
@@ -279,95 +351,115 @@ function App() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#14171F", fontFamily: "'Manrope', system-ui, sans-serif", color: "#F2EFE9" }}>
-      <div style={{ borderBottom: "1px solid #23283A", background: "#171B27" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <TundukMark size={30} />
-            <div>
-              <div style={{ fontFamily: "'Unbounded', sans-serif", fontSize: 16, fontWeight: 700, letterSpacing: "0.01em" }}>ТУНДУК</div>
-              <div style={{ fontSize: 11, color: "#8A90A6", marginTop: 2 }}>
-                {mode === "chat" ? "Интернетти издейт" : mode === "image" ? "Сүрөт тартат" : "Видео чогултат"}
-              </div>
-            </div>
-          </div>
+    <div style={{ display: "flex", height: "100vh", background: "#14171F", fontFamily: "'Manrope', system-ui, sans-serif", color: "#F2EFE9" }}>
+      {sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 40 }} />
+      )}
 
-          <div style={{ display: "flex", gap: 6 }}>
-            <button onClick={() => setMode("chat")} style={{ background: mode === "chat" ? "#C4402B" : "transparent", color: mode === "chat" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "chat" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>💬 Чат</button>
-            <button onClick={() => setMode("image")} style={{ background: mode === "image" ? "#C4402B" : "transparent", color: mode === "image" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "image" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎨 Сүрөт</button>
-            <button onClick={() => setMode("video")} style={{ background: mode === "video" ? "#C4402B" : "transparent", color: mode === "video" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "video" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎬 Видео</button>
-          </div>
+      <div style={{ position: "fixed", top: 0, left: sidebarOpen ? 0 : "-280px", width: 260, height: "100%", background: "#171B27", borderRight: "1px solid #23283A", zIndex: 50, transition: "left 0.2s", display: "flex", flexDirection: "column", padding: 14 }}>
+        <button onClick={startNewChat} style={{ background: "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 10, padding: "11px 14px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", marginBottom: 14 }}>+ Жаңы сүйлөшүү</button>
+
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+          {conversations.map((c) => (
+            <div key={c.id} onClick={() => switchConversation(c.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 12px", borderRadius: 9, background: c.id === currentId ? "#2A2F42" : "transparent", cursor: "pointer", fontSize: 13 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
+              <span onClick={(e) => deleteConversation(c.id, e)} style={{ color: "#8A90A6", fontSize: 15, padding: "0 4px" }}>×</span>
+            </div>
+          ))}
         </div>
-
-        {usage && (
-          <div style={{ padding: "0 20px 12px", display: "flex", justifyContent: "flex-end" }}>
-            <div style={{ fontSize: 11, color: "#8A90A6" }}>
-              {mode === "chat"
-                ? `Чат: ${usage.used ?? (usage.chat && usage.chat.used) ?? 0}/${usage.limit ?? (usage.chat && usage.chat.limit) ?? "?"}`
-                : `Сүрөт: ${usage.used ?? (usage.images && usage.images.used) ?? 0}/${usage.limit ?? (usage.images && usage.images.limit) ?? "?"}`}
-            </div>
-          </div>
-        )}
       </div>
 
-      {mode === "video" ? (
-        <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={{ fontSize: 13, color: "#8A90A6", lineHeight: 1.5 }}>
-            Ыр текстин жазыңыз — бот аны 6 сахнага бөлүп, ар бирине сүрөт тартып, жок дегенде 3 мүнөттүк слайдшоу-видео чогултат (телефонго жүктөп алса болот).
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+        <div style={{ borderBottom: "1px solid #23283A", background: "#171B27" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "16px 20px 12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div onClick={() => setSidebarOpen(true)} style={{ cursor: "pointer", fontSize: 20, padding: "2px 6px" }}>☰</div>
+              <TundukMark size={30} />
+              <div>
+                <div style={{ fontFamily: "'Unbounded', sans-serif", fontSize: 16, fontWeight: 700, letterSpacing: "0.01em" }}>ТУНДУК</div>
+                <div style={{ fontSize: 11, color: "#8A90A6", marginTop: 2 }}>
+                  {mode === "chat" ? "Интернетти издейт" : mode === "image" ? "Сүрөт тартат" : "Видео чогултат"}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => setMode("chat")} style={{ background: mode === "chat" ? "#C4402B" : "transparent", color: mode === "chat" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "chat" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>💬 Чат</button>
+              <button onClick={() => setMode("image")} style={{ background: mode === "image" ? "#C4402B" : "transparent", color: mode === "image" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "image" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎨 Сүрөт</button>
+              <button onClick={() => setMode("video")} style={{ background: mode === "video" ? "#C4402B" : "transparent", color: mode === "video" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "video" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎬 Видео</button>
+            </div>
           </div>
 
-          <textarea value={lyrics} onChange={(e) => setLyrics(e.target.value)} placeholder="Ырдын текстин ушул жерге жазыңыз..." rows={6} style={{ background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "12px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", resize: "vertical" }} />
-
-          <button onClick={generateVideo} disabled={videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim()} style={{ background: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "default" : "pointer" }}>
-            {videoStage ? "Иштеп жатам..." : "🎬 Видео жаса"}
-          </button>
-
-          {videoProgress && <div style={{ fontSize: 12.5, color: "#E8B84B" }}>{videoProgress}</div>}
-
-          <canvas ref={canvasRef} style={{ display: "none" }} />
-
-          {videoUrl && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <video src={videoUrl} controls playsInline style={{ width: "100%", borderRadius: 12, background: "#000" }} />
-              <a href={videoUrl} download="tunduk-video.mp4" style={{ textAlign: "center", background: "#2A2F42", color: "#F2EFE9", padding: "10px", borderRadius: 10, fontSize: 13.5, textDecoration: "none" }}>⬇️ Видеону телефонго сактоо</a>
+          {usage && (
+            <div style={{ padding: "0 20px 12px", display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ fontSize: 11, color: "#8A90A6" }}>
+                {mode === "chat"
+                  ? `Чат: ${usage.used ?? (usage.chat && usage.chat.used) ?? 0}/${usage.limit ?? (usage.chat && usage.chat.limit) ?? "?"}`
+                  : `Сүрөт: ${usage.used ?? (usage.images && usage.images.used) ?? 0}/${usage.limit ?? (usage.images && usage.images.limit) ?? "?"}`}
+              </div>
             </div>
           )}
-
-          {error && <div style={{ color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
         </div>
-      ) : (
-        <>
-          <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "24px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
-            {messages.map((m, i) =>
-              m.type === "image" ? (
-                <div key={i} style={{ alignSelf: "flex-start", maxWidth: "78%", background: "#1E2230", borderRadius: "16px 16px 16px 4px", overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
-                  <img src={m.content} alt={m.caption} style={{ width: "100%", display: "block" }} />
-                  <div style={{ padding: "8px 12px", fontSize: 12, color: "#8A90A6" }}>{m.caption}</div>
-                </div>
-              ) : (
-                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
-                  {m.content}
-                </div>
-              )
-            )}
 
-            {loading && (
-              <div style={{ alignSelf: "flex-start", background: "#1E2230", padding: "13px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 5 }}>
-                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
-                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
-                <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+        {mode === "video" ? (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 13, color: "#8A90A6", lineHeight: 1.5 }}>
+              Ыр текстин жазыңыз — бот аны 6 сахнага бөлүп, ар бирине сүрөт тартып, жок дегенде 3 мүнөттүк слайдшоу-видео чогултат (телефонго жүктөп алса болот).
+            </div>
+
+            <textarea value={lyrics} onChange={(e) => setLyrics(e.target.value)} placeholder="Ырдын текстин ушул жерге жазыңыз..." rows={6} style={{ background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "12px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", resize: "vertical" }} />
+
+            <button onClick={generateVideo} disabled={videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim()} style={{ background: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: videoStage === "scenes" || videoStage === "rendering" || !lyrics.trim() ? "default" : "pointer" }}>
+              {videoStage ? "Иштеп жатам..." : "🎬 Видео жаса"}
+            </button>
+
+            {videoProgress && <div style={{ fontSize: 12.5, color: "#E8B84B" }}>{videoProgress}</div>}
+
+            <canvas ref={canvasRef} style={{ display: "none" }} />
+
+            {videoUrl && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <video src={videoUrl} controls playsInline style={{ width: "100%", borderRadius: 12, background: "#000" }} />
+                <a href={videoUrl} download="tunduk-video.mp4" style={{ textAlign: "center", background: "#2A2F42", color: "#F2EFE9", padding: "10px", borderRadius: 10, fontSize: 13.5, textDecoration: "none" }}>⬇️ Видеону телефонго сактоо</a>
               </div>
             )}
 
-            {error && <div style={{ alignSelf: "center", color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
+            {error && <div style={{ color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
           </div>
+        ) : (
+          <>
+            <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "24px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              {messages.map((m, i) =>
+                m.type === "image" ? (
+                  <div key={i} style={{ alignSelf: "flex-start", maxWidth: "78%", background: "#1E2230", borderRadius: "16px 16px 16px 4px", overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
+                    <img src={m.content} alt={m.caption} style={{ width: "100%", display: "block" }} />
+                    <div style={{ padding: "8px 12px", fontSize: 12, color: "#8A90A6" }}>{m.caption}</div>
+                  </div>
+                ) : (
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
+                    {m.content}
+                  </div>
+                )
+              )}
 
-          <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
-            <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
-            <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
-          </div>
-        </>
-      )}
+              {loading && (
+                <div style={{ alignSelf: "flex-start", background: "#1E2230", padding: "13px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 5 }}>
+                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
+                </div>
+              )}
+
+              {error && <div style={{ alignSelf: "center", color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
+            </div>
+
+            <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
+              <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
+              <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
