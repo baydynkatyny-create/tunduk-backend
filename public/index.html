@@ -162,6 +162,74 @@ function App() {
     updateMessages([...newMessages, { role: "assistant", content: data.reply }]);
   };
 
+  const [fileLoading, setFileLoading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleFilePick = () => {
+    if (fileInputRef.current) fileInputRef.current.click();
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+
+    const allowedTypes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "application/zip",
+      "application/x-zip-compressed",
+    ];
+    const isZipExt = file.name.toLowerCase().endsWith(".zip");
+    if (!allowedTypes.includes(file.type) && !isZipExt) {
+      setError("Бул файл түрү колдоого алынбайт. PDF, сүрөт (jpg/png) же ZIP жиберсеңиз болот.");
+      return;
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      setError("Файл өтө чоң (15МБ чегинен ашпасын).");
+      return;
+    }
+
+    const userMsgText = `📎 Файл жиберди: ${file.name}`;
+    const newMessages = [...messages, { role: "user", content: userMsgText }];
+    updateMessages(newMessages);
+    setFileLoading(true);
+    setError(null);
+
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const mimeType = file.type || (isZipExt ? "application/zip" : "application/octet-stream");
+
+      const response = await fetch("/api/analyze-file", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileBase64: base64, mimeType, fileName: file.name }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.usage) setUsage(data.usage);
+        throw new Error(data.error || "Сервер катасы: " + response.status);
+      }
+      if (data.usage) setUsage(data.usage);
+
+      updateMessages([...newMessages, { role: "assistant", content: data.reply }]);
+    } catch (err) {
+      setError("Файл катасы: " + err.message);
+    } finally {
+      setFileLoading(false);
+    }
+  };
+
   const sendImage = async (prompt, newMessages) => {
     const response = await fetch("/api/image", {
       method: "POST",
@@ -454,9 +522,16 @@ function App() {
             </div>
 
             <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
+              <input ref={fileInputRef} type="file" accept=".pdf,.zip,image/jpeg,image/png,image/webp,application/pdf,application/zip,application/x-zip-compressed" onChange={handleFileChange} style={{ display: "none" }} />
+              {mode === "chat" && (
+                <button onClick={handleFilePick} disabled={fileLoading || loading} title="Файл жүктөө (PDF, сүрөт, ZIP)" style={{ background: "#1E2230", color: "#8A90A6", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 13px", fontSize: 16, fontFamily: "inherit", cursor: fileLoading || loading ? "default" : "pointer", flexShrink: 0 }}>📎</button>
+              )}
               <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
               <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
             </div>
+            {fileLoading && (
+              <div style={{ padding: "0 16px 10px", fontSize: 12.5, color: "#E8B84B", background: "#171B27" }}>📎 Файл талданып жатат...</div>
+            )}
           </>
         )}
       </div>
