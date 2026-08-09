@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Тундук — Кыргызча AI жардамчы</title>
+<link rel="icon" type="image/png" href="/tunduk-logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
@@ -31,21 +32,7 @@
 const { useState, useRef, useEffect } = React;
 
 const TundukMark = ({ size = 28 }) => (
-  <svg width={size} height={size} viewBox="0 0 100 100" fill="none">
-    <circle cx="50" cy="50" r="46" stroke="#E8B84B" strokeWidth="2" opacity="0.4" />
-    {[...Array(8)].map((_, i) => {
-      const angle = (i * 45 * Math.PI) / 180;
-      const x1 = 50 + 18 * Math.cos(angle);
-      const y1 = 50 + 18 * Math.sin(angle);
-      const x2 = 50 + 42 * Math.cos(angle);
-      const y2 = 50 + 42 * Math.sin(angle);
-      return (
-        <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#E8B84B" strokeWidth="2.5" strokeLinecap="round" />
-      );
-    })}
-    <circle cx="50" cy="50" r="10" fill="#C4402B" />
-    <circle cx="50" cy="50" r="10" stroke="#E8B84B" strokeWidth="2" />
-  </svg>
+  <img src="/tunduk-logo.png" alt="Тундук" style={{ width: size, height: size, objectFit: "contain" }} />
 );
 
 function App() {
@@ -496,50 +483,4 @@ function App() {
           </div>
         ) : (
           <>
-            <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "24px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
-              {messages.map((m, i) =>
-                m.type === "image" ? (
-                  <div key={i} style={{ alignSelf: "flex-start", maxWidth: "78%", background: "#1E2230", borderRadius: "16px 16px 16px 4px", overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
-                    <img src={m.content} alt={m.caption} style={{ width: "100%", display: "block" }} />
-                    <div style={{ padding: "8px 12px", fontSize: 12, color: "#8A90A6" }}>{m.caption}</div>
-                  </div>
-                ) : (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
-                    {m.content}
-                  </div>
-                )
-              )}
-
-              {loading && (
-                <div style={{ alignSelf: "flex-start", background: "#1E2230", padding: "13px 18px", borderRadius: "16px 16px 16px 4px", display: "flex", gap: 5 }}>
-                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
-                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
-                  <span className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8B84B", display: "inline-block" }} />
-                </div>
-              )}
-
-              {error && <div style={{ alignSelf: "center", color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
-            </div>
-
-            <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
-              <input ref={fileInputRef} type="file" accept=".pdf,.zip,image/jpeg,image/png,image/webp,application/pdf,application/zip,application/x-zip-compressed" onChange={handleFileChange} style={{ display: "none" }} />
-              {mode === "chat" && (
-                <button onClick={handleFilePick} disabled={fileLoading || loading} title="Файл жүктөө (PDF, сүрөт, ZIP)" style={{ background: "#1E2230", color: "#8A90A6", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 13px", fontSize: 16, fontFamily: "inherit", cursor: fileLoading || loading ? "default" : "pointer", flexShrink: 0 }}>📎</button>
-              )}
-              <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
-              <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
-            </div>
-            {fileLoading && (
-              <div style={{ padding: "0 16px 10px", fontSize: 12.5, color: "#E8B84B", background: "#171B27" }}>📎 Файл талданып жатат...</div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-</script>
-</body>
-</html>
+            <div ref={scrollRef
