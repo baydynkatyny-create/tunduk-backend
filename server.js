@@ -15,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 dotenv.config();
 
+// --- Керектүү ачкычтар барбы, серверди баштаардан текшеребиз ---
 const REQUIRED_ENV = ["GEMINI_API_KEY", "ADMIN_KEY"];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length > 0) {
@@ -37,6 +38,7 @@ app.use(
   })
 );
 
+// IP-негизделген коргоо — экинчи катмар, cookie тазаланса дагы толук чектелбесин үчүн
 const ipGuard = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
@@ -66,13 +68,14 @@ const SYSTEM_PROMPT = `Сен "Тундук" деген кыргызча AI жа
 
 Сен эч качан жалаңач, порнографиялык же жыныстык мазмундагы текст, сүрөт же видео түзбөйсүң же талкуулабайсың — колдонуучу кандай гана жол менен сурабасын (уламыш, шылтоо, "билим үчүн" деп жасалма шылтоо менен болсо да). Мындай сурам келгенде сылык түрдө баш тарт жана башка теманы сунуштап кой.`;
 
+// --- Колдонуучу ID: сервер өзү түзөт жана "httpOnly" cookie'ге жазат ---
 function identifyUser(req, res, next) {
   let userId = req.cookies?.tunduk_uid;
   if (!userId) {
     userId = crypto.randomUUID();
     res.cookie("tunduk_uid", userId, {
       httpOnly: true,
-      maxAge: 400 * 24 * 60 * 60 * 1000,
+      maxAge: 400 * 24 * 60 * 60 * 1000, // ~400 күн — браузерлердин cookie чегине ылайык
       sameSite: "lax",
     });
   }
@@ -83,6 +86,23 @@ function identifyUser(req, res, next) {
 app.use(ipGuard);
 app.use(identifyUser);
 
+// --- Жөнөкөй мазмун чыпкасы: бул толук moderation эмес, биринчи коргоо катмары гана ---
+const BLOCKED_PATTERNS = [
+  /\bжалаӊач\b/i,
+  /\bпорно\b/i,
+  /nude/i,
+  /naked/i,
+  /porn/i,
+  /explicit/i,
+  /child.*sex/i,
+  /\bбала.*секс/i,
+];
+
+function isBlockedPrompt(text) {
+  return BLOCKED_PATTERNS.some((re) => re.test(text));
+}
+
+// --- Чат эндпоинти ---
 app.post("/api/chat", async (req, res) => {
   try {
     const check = checkAndIncrement(req.userId, "chat");
@@ -90,4 +110,417 @@ app.post("/api/chat", async (req, res) => {
       return res.status(429).json({
         error: `Күндүк чат чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
         usage: check,
-        
+      });
+    }
+
+    const { messages } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "messages талаасы керек" });
+    }
+
+    // Gemini чат-тарых форматына айландырабыз: { role, parts:[{text}] }
+    // Gemini "system" ролун колдоого албайт, ошондуктан system prompt'ту
+    // systemInstruction талаасы аркылуу өзүнчө жиберебиз.
+    const geminiContents = messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: geminiContents,
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          generationConfig: { maxOutputTokens: 1500 },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini error:", errText);
+      return res.status(502).json({ error: "AI кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const reply =
+      data.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
+        .join("\n\n") || "Кечиресиз, жооп ала алган жокмун.";
+
+    res.json({ reply, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Сүрөт эндпоинти ---
+app.post("/api/image", async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "prompt талаасы керек" });
+    }
+
+    if (isBlockedPrompt(prompt)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет. Башка сурам жазыңыз." });
+    }
+
+    const check = checkAndIncrement(req.userId, "images");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк сүрөт чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini error:", errText);
+      return res.status(502).json({ error: "Сүрөт кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Сүрөт кайтарылган жок" });
+    }
+
+    res.json({
+      dataUrl: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+      usage: check,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Сүрөт түзөтүү эндпоинти: колдонуучу жүктөгөн сүрөттү промпт боюнча өзгөртөт ---
+app.post("/api/edit-image", async (req, res) => {
+  try {
+    const { imageBase64, mimeType, prompt } = req.body;
+    if (!imageBase64 || !mimeType) {
+      return res.status(400).json({ error: "imageBase64 жана mimeType талаалары керек" });
+    }
+    if (!mimeType.startsWith("image/")) {
+      return res.status(400).json({ error: "Бул файл сүрөт эмес" });
+    }
+
+    const promptText = (prompt && String(prompt).trim()) || "Бул сүрөттү сулуулант, сапатын жогорулат";
+
+    if (isBlockedPrompt(promptText)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет. Башка сурам жазыңыз." });
+    }
+
+    const check = checkAndIncrement(req.userId, "images");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк сүрөт чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: promptText },
+                { inlineData: { mimeType, data: imageBase64 } },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini error:", errText);
+      return res.status(502).json({ error: "Сүрөт түзөтүү кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Түзөтүлгөн сүрөт кайтарылган жок" });
+    }
+
+    res.json({
+      dataUrl: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+      usage: check,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Үн (текст → сүйлөө) эндпоинти ---
+app.post("/api/speak", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text талаасы керек" });
+    }
+
+    // Үн окуу — чат менен бир эле лимитти колдонот (өзүнчө эсептегич жок)
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чегиңизге жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    // Узун тексттерди кыскартабыз — TTS моделдери өтө узун киргизүүнү жактырбайт
+    const trimmedText = text.length > 3000 ? text.slice(0, 3000) : text;
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: trimmedText }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+            },
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini TTS error:", errText);
+      return res.status(502).json({ error: "Үн кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Үн кайтарылган жок" });
+    }
+
+    // Фронтенд 24000 Hz, 16-bit, моно PCM күтөт (pcmToWavBlob функциясы)
+    res.json({ audioBase64: part.inlineData.data, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- ZIP ичиндеги текст файлдарды окуп чогултуучу жардамчы функция ---
+const TEXT_EXTENSIONS = [
+  ".js", ".jsx", ".ts", ".tsx", ".json", ".md", ".txt", ".html", ".htm",
+  ".css", ".py", ".java", ".c", ".cpp", ".h", ".cs", ".go", ".rs", ".php",
+  ".rb", ".yml", ".yaml", ".xml", ".sh", ".env.example", ".sql",
+];
+const MAX_ZIP_ENTRIES = 40;
+const MAX_CHARS_PER_FILE = 3000;
+const MAX_TOTAL_CHARS = 30000;
+
+function extractZipText(base64Data) {
+  const buffer = Buffer.from(base64Data, "base64");
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries().filter((e) => !e.isDirectory);
+
+  let combined = "";
+  let fileCount = 0;
+
+  for (const entry of entries) {
+    if (fileCount >= MAX_ZIP_ENTRIES) break;
+    const ext = path.extname(entry.entryName).toLowerCase();
+    if (!TEXT_EXTENSIONS.includes(ext)) continue;
+    if (combined.length >= MAX_TOTAL_CHARS) break;
+
+    try {
+      let content = entry.getData().toString("utf-8");
+      if (content.length > MAX_CHARS_PER_FILE) {
+        content = content.slice(0, MAX_CHARS_PER_FILE) + "\n... (кыскартылды)";
+      }
+      combined += `\n\n--- Файл: ${entry.entryName} ---\n${content}`;
+      fileCount += 1;
+    } catch {
+      // Окулбаган (мис. бинардык) файлдарды өткөрүп жиберебиз
+    }
+  }
+
+  const skippedNote =
+    entries.length > fileCount
+      ? `\n\n(Архивде дагы ${entries.length - fileCount} файл бар, бирок алар көрсөтүлгөн жок — көлөм чегинен улам.)`
+      : "";
+
+  return { text: combined + skippedNote, fileCount, totalEntries: entries.length };
+}
+
+// --- Файл талдоо эндпоинти: PDF, сүрөт же ZIP кабыл алат ---
+app.post("/api/analyze-file", async (req, res) => {
+  try {
+    const { fileBase64, mimeType, fileName } = req.body;
+    if (!fileBase64 || !mimeType) {
+      return res.status(400).json({ error: "fileBase64 жана mimeType талаалары керек" });
+    }
+
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чегиңизге жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const isZip =
+      mimeType === "application/zip" ||
+      mimeType === "application/x-zip-compressed" ||
+      (fileName && fileName.toLowerCase().endsWith(".zip"));
+
+    let geminiContents;
+
+    if (isZip) {
+      let zipResult;
+      try {
+        zipResult = extractZipText(fileBase64);
+      } catch (e) {
+        console.error("ZIP окуу катасы:", e.message);
+        return res.status(400).json({ error: "ZIP файлын ачуу мүмкүн болбоду" });
+      }
+
+      if (!zipResult.text.trim()) {
+        return res.status(400).json({ error: "Архивден окулуучу текст файлдары табылган жок" });
+      }
+
+      geminiContents = [
+        {
+          role: "user",
+          parts: [
+            {
+              text:
+                `Бул "${fileName || "архив"}" деген ZIP файлдын ичиндеги файлдар (${zipResult.fileCount}/${zipResult.totalEntries}). ` +
+                `Мазмунун кыргызча талда: бул эмне долбоор экенин, түзүлүшүн жана негизги бөлүктөрүн түшүндүр.\n${zipResult.text}`,
+            },
+          ],
+        },
+      ];
+    } else {
+      // PDF же сүрөт — Gemini'ге түз мултимодалдык бөлүк катары жиберебиз
+      geminiContents = [
+        {
+          role: "user",
+          parts: [
+            { text: "Бул файлды кыргызча талда жана мазмунун түшүндүр." },
+            { inlineData: { mimeType, data: fileBase64 } },
+          ],
+        },
+      ];
+    }
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: geminiContents,
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          generationConfig: { maxOutputTokens: 1800 },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Gemini error:", errText);
+      return res.status(502).json({ error: "Файл талдоо кызматы жооп берген жок" });
+    }
+
+    const data = await response.json();
+    const reply =
+      data.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
+        .join("\n\n") || "Кечиресиз, файлды талдай алган жокмун.";
+
+    res.json({ reply, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Gemini аркылуу бир сүрөт жаратуучу жардамчы функция (видео сахналары үчүн) ---
+async function generateImageDataUrl(prompt) {
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image-preview:generateContent",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    }
+  );
+  if (!response.ok) throw new Error("Gemini катасы: " + response.status);
+  const data = await response.json();
+  const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+  if (!part) throw new Error("Сүрөт кайтарылган жок");
+  return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+}
+
+// --- Видео сахналары: ырды сахналарга бөлүп, ар бирине сүрөт тартат ---
+// Клиент (браузер) бул сахналарды алып, canvas+MediaRecorder менен видеого айландырат.
+app.post("/api/video-scenes", async (req, res) => {
+  try {
+    const { lyrics } = req.body;
+    if (!lyrics || typeof lyrics !== "string" || lyrics.trim().length < 5) {
+      return res.status(400).json({ error: "Ыр тексти керек (лирика)" });
+    }
+    if (isBlockedPrompt(lyrics)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет." });
+    }
+
+    const check = checkAndIncrement(req.userId, "video");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк видео чегине же
