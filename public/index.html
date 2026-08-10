@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Тундук — Кыргызча AI жардамчы</title>
-<link rel="icon" type="image/png" href="/tunduk-logo.png" />
+<link rel="icon" type="image/png" href="./tunduk-logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
@@ -32,7 +32,7 @@
 const { useState, useRef, useEffect } = React;
 
 const TundukMark = ({ size = 28 }) => (
-  <img src="/tunduk-logo.png" alt="Тундук" style={{ width: size, height: size, objectFit: "contain" }} />
+  <img src="./tunduk-logo.png" alt="Тундук" style={{ width: size, height: size, objectFit: "contain" }} />
 );
 
 function App() {
@@ -53,11 +53,189 @@ function App() {
   const [videoStage, setVideoStage] = useState("");
   const [videoUrl, setVideoUrl] = useState(null);
   const [videoProgress, setVideoProgress] = useState("");
+  const [videoExt, setVideoExt] = useState("webm");
   const canvasRef = useRef(null);
   const [usage, setUsage] = useState(null);
   const scrollRef = useRef(null);
 
-  const defaultGreeting = { role: "assistant", content: "Салам! Мен — Тундук, сиздин кыргызча AI жардамчыңыз. Эмне жөнүндө сүйлөшөбүз?" };
+  const [reminders, setReminders] = useState(() => {
+    try {
+      const saved = localStorage.getItem("tunduk_reminders");
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+  const [reminderLabel, setReminderLabel] = useState("");
+  const [reminderMinutes, setReminderMinutes] = useState("10");
+  const [reminderAlarmTime, setReminderAlarmTime] = useState("07:00");
+  const [reminderKind, setReminderKind] = useState("timer");
+  const [reminderDays, setReminderDays] = useState([]);
+  const audioCtxRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("tunduk_reminders", JSON.stringify(reminders));
+    } catch {}
+  }, [reminders]);
+
+  useEffect(() => {
+    if (window.Notification && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, []);
+
+  const playBeep = () => {
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtxRef.current;
+      for (let i = 0; i < 3; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.001, ctx.currentTime + i * 0.5);
+        gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + i * 0.5 + 0.02);
+        gain.gain.linearRampToValueAtTime(0.001, ctx.currentTime + i * 0.5 + 0.4);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(ctx.currentTime + i * 0.5);
+        osc.stop(ctx.currentTime + i * 0.5 + 0.45);
+      }
+    } catch {}
+  };
+
+  const fireReminder = (r) => {
+    playBeep();
+    if (window.Notification && Notification.permission === "granted") {
+      try {
+        new Notification("⏰ Тундук эскертүү", { body: r.label || "Убакыт келди!" });
+      } catch {}
+    }
+    setError(null);
+  };
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setReminders((prev) => {
+        let changed = false;
+        const next = prev.map((r) => {
+          if (r.done || r.triggerAt > now) return r;
+          changed = true;
+          fireReminder(r);
+          if (r.kind === "alarm" && r.days && r.days.length > 0) {
+            const nextTrigger = nextAlarmTimestamp(r.hour, r.minute, r.days);
+            return { ...r, triggerAt: nextTrigger };
+          }
+          return { ...r, done: true };
+        });
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  function nextAlarmTimestamp(hour, minute, days) {
+    const now = new Date();
+    for (let add = 0; add < 8; add++) {
+      const d = new Date(now);
+      d.setDate(now.getDate() + add);
+      d.setHours(hour, minute, 0, 0);
+      const weekday = d.getDay() + 1;
+      if (d.getTime() > now.getTime() && (days.length === 0 || days.includes(weekday))) {
+        return d.getTime();
+      }
+    }
+    const d = new Date(now);
+    d.setDate(now.getDate() + 1);
+    d.setHours(hour, minute, 0, 0);
+    return d.getTime();
+  }
+
+  const addTimerReminder = () => {
+    const mins = parseFloat(reminderMinutes);
+    if (!mins || mins <= 0) {
+      setError("Мүнөттөрдү туура киргизиңиз.");
+      return;
+    }
+    const triggerAt = Date.now() + mins * 60 * 1000;
+    setReminders((prev) => [
+      ...prev,
+      { id: Date.now().toString(), kind: "timer", label: reminderLabel.trim() || "Таймер", triggerAt, done: false },
+    ]);
+    setReminderLabel("");
+    setError(null);
+  };
+
+  const addAlarmReminder = () => {
+    const [hStr, mStr] = reminderAlarmTime.split(":");
+    const hour = parseInt(hStr, 10);
+    const minute = parseInt(mStr, 10);
+    if (isNaN(hour) || isNaN(minute)) {
+      setError("Убакытты туура киргизиңиз.");
+      return;
+    }
+    const triggerAt = nextAlarmTimestamp(hour, minute, reminderDays);
+    setReminders((prev) => [
+      ...prev,
+      {
+        id: Date.now().toString(),
+        kind: "alarm",
+        label: reminderLabel.trim() || "Эскертүү",
+        hour,
+        minute,
+        days: reminderDays,
+        triggerAt,
+        done: false,
+      },
+    ]);
+    setReminderLabel("");
+    setError(null);
+  };
+
+  const deleteReminder = (id) => setReminders((prev) => prev.filter((r) => r.id !== id));
+
+  const toggleReminderDay = (day) => {
+    setReminderDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort()));
+  };
+
+  const dayLabels = ["Жк", "Дш", "Шш", "Шр", "Бш", "Жм", "Иш"];
+
+  const downloadAsWord = (filename, title, bodyHtml) => {
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${bodyHtml}</body></html>`;
+    const blob = new Blob(["\ufeff", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  };
+
+  const escapeHtml = (s) =>
+    String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br/>");
+
+  const downloadMessage = (content) => {
+    downloadAsWord(
+      "tunduk-jooп.doc",
+      "Тундук жообу",
+      `<p style="font-family:Arial;font-size:14px;">${escapeHtml(content)}</p>`
+    );
+  };
+
+  const downloadConversation = () => {
+    const body = messages
+      .filter((m) => m.type !== "image")
+      .map(
+        (m) =>
+          `<p style="font-family:Arial;font-size:14px;"><b>${m.role === "user" ? "Сиз" : "Тундук"}:</b><br/>${escapeHtml(m.content)}</p>`
+      )
+      .join("");
+    downloadAsWord("tunduk-suylosuu.doc", "Тундук менен сүйлөшүү", body);
+  };
+
+  const defaultGreeting = { role: "assistant", content: "Салам! Мен — Тундук, сиздин кыргызча AI жардамчыңыз. Күнүмдүк суроолордон тартып, физика, биология, астрономия, тарых сыяктуу дүйнөлүк илимдердин темаларына чейин — эмне жөнүндө болсо да сурай бериңиз!" };
 
   useEffect(() => {
     if (conversations.length === 0) {
@@ -69,11 +247,26 @@ function App() {
     }
   }, []);
 
+  const [storageWarning, setStorageWarning] = useState(false);
+
   useEffect(() => {
-    if (conversations.length > 0) {
+    if (conversations.length === 0) return;
+    try {
+      localStorage.setItem("tunduk_conversations", JSON.stringify(conversations));
+      setStorageWarning(false);
+    } catch (e) {
       try {
-        localStorage.setItem("tunduk_conversations", JSON.stringify(conversations));
-      } catch {}
+        const lightweight = conversations.map((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.type === "image" ? { role: m.role, type: "image", content: "", caption: m.caption } : m
+          ),
+        }));
+        localStorage.setItem("tunduk_conversations", JSON.stringify(lightweight));
+        setStorageWarning(true);
+      } catch (e2) {
+        setStorageWarning(true);
+      }
     }
   }, [conversations]);
 
@@ -147,6 +340,68 @@ function App() {
 
     if (data.usage) setUsage(data.usage);
     updateMessages([...newMessages, { role: "assistant", content: data.reply }]);
+  };
+
+  const [speakingIndex, setSpeakingIndex] = useState(null);
+
+  function pcmToWavBlob(base64Pcm, sampleRate = 24000) {
+    const binary = atob(base64Pcm);
+    const len = binary.length;
+    const pcmBytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) pcmBytes[i] = binary.charCodeAt(i);
+
+    const numChannels = 1, bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
+    const buffer = new ArrayBuffer(44 + pcmBytes.length);
+    const view = new DataView(buffer);
+
+    function writeStr(offset, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + pcmBytes.length, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeStr(36, "data");
+    view.setUint32(40, pcmBytes.length, true);
+
+    new Uint8Array(buffer, 44).set(pcmBytes);
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  const speakText = async (text, index) => {
+    if (speakingIndex !== null) return;
+    setSpeakingIndex(index);
+    setError(null);
+    try {
+      const response = await fetch("/api/speak", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Үн катасы: " + response.status);
+
+      const blob = pcmToWavBlob(data.audioBase64);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => setSpeakingIndex(null);
+      audio.onerror = () => setSpeakingIndex(null);
+      await audio.play();
+    } catch (err) {
+      setError("Үн ката: " + err.message);
+      setSpeakingIndex(null);
+    }
   };
 
   const [fileLoading, setFileLoading] = useState(false);
@@ -249,6 +504,12 @@ function App() {
     return null;
   }
 
+  function extensionForMimeType(mimeType) {
+    if (!mimeType) return "webm";
+    if (mimeType.indexOf("mp4") !== -1) return "mp4";
+    return "webm";
+  }
+
   function wrapText(ctx, text, maxWidth) {
     const words = text.split(" ");
     const lines = [];
@@ -313,6 +574,7 @@ function App() {
 
       const mimeType = pickSupportedMimeType();
       if (!mimeType) throw new Error("Бул браузер видео жаза албайт");
+      setVideoExt(extensionForMimeType(mimeType));
 
       const stream = canvas.captureStream(30);
       const recorder = new MediaRecorder(stream, { mimeType });
@@ -375,6 +637,64 @@ function App() {
     }
   };
 
+  const editImageInputRef = useRef(null);
+  const [editImageLoading, setEditImageLoading] = useState(false);
+
+  const handleEditImagePick = () => {
+    if (editImageInputRef.current) editImageInputRef.current.click();
+  };
+
+  const handleEditImageChange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setError("Сураныч, сүрөт файлын тандаңыз (jpg, png).");
+      return;
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      setError("Сүрөт өтө чоң (15МБ чегинен ашпасын).");
+      return;
+    }
+
+    const prompt = input.trim() || "Бул сүрөттү сулуулант, сапатын жогорулат";
+    const newMessages = [...messages, { role: "user", content: `📸 Сүрөттү түзөтүү сурамы: ${prompt}` }];
+    updateMessages(newMessages);
+    setInput("");
+    setEditImageLoading(true);
+    setError(null);
+
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const response = await fetch("/api/edit-image", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: base64, mimeType: file.type, prompt }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (data.usage) setUsage(data.usage);
+        throw new Error(data.error || "Сервер катасы: " + response.status);
+      }
+      if (data.usage) setUsage(data.usage);
+
+      updateMessages([...newMessages, { role: "assistant", type: "image", content: data.dataUrl, caption: prompt }]);
+    } catch (err) {
+      setError("Сүрөт түзөтүү катасы: " + err.message);
+    } finally {
+      setEditImageLoading(false);
+    }
+  };
+
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -433,30 +753,98 @@ function App() {
               <div>
                 <div style={{ fontFamily: "'Unbounded', sans-serif", fontSize: 16, fontWeight: 700, letterSpacing: "0.01em" }}>ТУНДУК</div>
                 <div style={{ fontSize: 11, color: "#8A90A6", marginTop: 2 }}>
-                  {mode === "chat" ? "Интернетти издейт" : mode === "image" ? "Сүрөт тартат" : "Видео чогултат"}
+                  {mode === "chat" ? "Интернетти издейт" : mode === "image" ? "Сүрөт тартат" : mode === "video" ? "Видео чогултат" : "Эскертүү коёт"}
                 </div>
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
               <button onClick={() => setMode("chat")} style={{ background: mode === "chat" ? "#C4402B" : "transparent", color: mode === "chat" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "chat" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>💬 Чат</button>
               <button onClick={() => setMode("image")} style={{ background: mode === "image" ? "#C4402B" : "transparent", color: mode === "image" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "image" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎨 Сүрөт</button>
               <button onClick={() => setMode("video")} style={{ background: mode === "video" ? "#C4402B" : "transparent", color: mode === "video" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "video" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>🎬 Видео</button>
+              <button onClick={() => setMode("reminder")} style={{ background: mode === "reminder" ? "#C4402B" : "transparent", color: mode === "reminder" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (mode === "reminder" ? "#C4402B" : "#2A2F42"), borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>⏰ Эскертүү</button>
             </div>
           </div>
+
+          {storageWarning && (
+            <div style={{ padding: "0 20px 10px", fontSize: 11.5, color: "#E8B84B" }}>
+              ⚠️ Байланыш эсинде орун жетишсиз — эски сүрөттөр сакталбай калышы мүмкүн.
+            </div>
+          )}
+
+          {mode === "chat" && messages.some((m) => m.role === "assistant" && m.type !== "image") && (
+            <div style={{ padding: "0 20px 10px", display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={downloadConversation} style={{ background: "none", border: "1px solid #2A2F42", color: "#8A90A6", borderRadius: 8, padding: "5px 10px", fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>📄 Сүйлөшүүнү Word кылып сактоо</button>
+            </div>
+          )}
 
           {usage && (
             <div style={{ padding: "0 20px 12px", display: "flex", justifyContent: "flex-end" }}>
               <div style={{ fontSize: 11, color: "#8A90A6" }}>
                 {mode === "chat"
                   ? `Чат: ${usage.used ?? (usage.chat && usage.chat.used) ?? 0}/${usage.limit ?? (usage.chat && usage.chat.limit) ?? "?"}`
-                  : `Сүрөт: ${usage.used ?? (usage.images && usage.images.used) ?? 0}/${usage.limit ?? (usage.images && usage.images.limit) ?? "?"}`}
+                  : mode === "video"
+                  ? `Видео: ${(usage.video && usage.video.used) ?? usage.used ?? 0}/${(usage.video && usage.video.limit) ?? usage.limit ?? "?"}`
+                  : `Сүрөт: ${(usage.images && usage.images.used) ?? usage.used ?? 0}/${(usage.images && usage.images.limit) ?? usage.limit ?? "?"}`}
               </div>
             </div>
           )}
         </div>
 
-        {mode === "video" ? (
+        {mode === "reminder" ? (
+          <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ fontSize: 13, color: "#8A90A6", lineHeight: 1.5 }}>
+              Таймер же күнүмдүк эскертүү (мис: дары ичүү, ойгонуу) коюңуз. Барак ачык турганда добуш жана билдирүү менен эскертет.
+            </div>
+
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => setReminderKind("timer")} style={{ flex: 1, background: reminderKind === "timer" ? "#C4402B" : "#1E2230", color: reminderKind === "timer" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (reminderKind === "timer" ? "#C4402B" : "#2A2F42"), borderRadius: 10, padding: "10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>⏱️ Таймер</button>
+              <button onClick={() => setReminderKind("alarm")} style={{ flex: 1, background: reminderKind === "alarm" ? "#C4402B" : "#1E2230", color: reminderKind === "alarm" ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (reminderKind === "alarm" ? "#C4402B" : "#2A2F42"), borderRadius: 10, padding: "10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>⏰ Эскертүү</button>
+            </div>
+
+            <input value={reminderLabel} onChange={(e) => setReminderLabel(e.target.value)} placeholder="Эмне жөнүндө? (мис: Дары ичүү)" style={{ background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14, fontFamily: "inherit" }} />
+
+            {reminderKind === "timer" ? (
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <input type="number" min="1" value={reminderMinutes} onChange={(e) => setReminderMinutes(e.target.value)} style={{ width: 90, background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14, fontFamily: "inherit" }} />
+                <span style={{ fontSize: 13, color: "#8A90A6" }}>мүнөттөн кийин</span>
+              </div>
+            ) : (
+              <>
+                <input type="time" value={reminderAlarmTime} onChange={(e) => setReminderAlarmTime(e.target.value)} style={{ background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14, fontFamily: "inherit" }} />
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {dayLabels.map((d, idx) => (
+                    <button key={idx} onClick={() => toggleReminderDay(idx + 1)} style={{ width: 36, height: 36, borderRadius: "50%", background: reminderDays.includes(idx + 1) ? "#C4402B" : "#1E2230", color: reminderDays.includes(idx + 1) ? "#FBF3EC" : "#8A90A6", border: "1px solid " + (reminderDays.includes(idx + 1) ? "#C4402B" : "#2A2F42"), fontSize: 12, fontFamily: "inherit", cursor: "pointer" }}>{d}</button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11.5, color: "#8A90A6" }}>Күн тандалбаса — бир жолу гана эртеңки ушул убакытта эскертет.</div>
+              </>
+            )}
+
+            <button onClick={reminderKind === "timer" ? addTimerReminder : addAlarmReminder} style={{ background: "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>
+              + Кошуу
+            </button>
+
+            {error && <div style={{ color: "#F2A0A0", fontSize: 13, background: "#2A1A1E", padding: "8px 14px", borderRadius: 10, border: "1px solid #4A2530" }}>{error}</div>}
+
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+              {reminders.length === 0 && <div style={{ fontSize: 13, color: "#8A90A6" }}>Азырынча эскертүү жок.</div>}
+              {reminders.filter((r) => !r.done || (r.kind === "alarm" && r.days && r.days.length > 0)).map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#1E2230", borderRadius: 12, padding: "12px 14px" }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{r.kind === "timer" ? "⏱️" : "⏰"} {r.label}</div>
+                    <div style={{ fontSize: 12, color: "#8A90A6", marginTop: 2 }}>
+                      {r.kind === "alarm"
+                        ? `${String(r.hour).padStart(2, "0")}:${String(r.minute).padStart(2, "0")}` + (r.days && r.days.length ? " · " + r.days.map((d) => dayLabels[d - 1]).join(", ") : " · бир жолу")
+                        : new Date(r.triggerAt).toLocaleTimeString("ky-KG", { hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  </div>
+                  <button onClick={() => deleteReminder(r.id)} style={{ background: "none", border: "none", color: "#8A90A6", fontSize: 18, cursor: "pointer", padding: "4px 8px" }}>×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : mode === "video" ? (
           <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ fontSize: 13, color: "#8A90A6", lineHeight: 1.5 }}>
               Ыр текстин жазыңыз — бот аны 6 сахнага бөлүп, ар бирине сүрөт тартып, жок дегенде 3 мүнөттүк слайдшоу-видео чогултат (телефонго жүктөп алса болот).
@@ -475,7 +863,8 @@ function App() {
             {videoUrl && (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <video src={videoUrl} controls playsInline style={{ width: "100%", borderRadius: 12, background: "#000" }} />
-                <a href={videoUrl} download="tunduk-video.mp4" style={{ textAlign: "center", background: "#2A2F42", color: "#F2EFE9", padding: "10px", borderRadius: 10, fontSize: 13.5, textDecoration: "none" }}>⬇️ Видеону телефонго сактоо</a>
+                <a href={videoUrl} download={`tunduk-video.${videoExt}`} style={{ textAlign: "center", background: "#2A2F42", color: "#F2EFE9", padding: "10px", borderRadius: 10, fontSize: 13.5, textDecoration: "none" }}>⬇️ Видеону телефонго сактоо</a>
+                <div style={{ fontSize: 11.5, color: "#8A90A6", textAlign: "center" }}>Барак жаңыртылса бул видео жоголот — азыр жүктөп алыңыз.</div>
               </div>
             )}
 
@@ -491,8 +880,20 @@ function App() {
                     <div style={{ padding: "8px 12px", fontSize: 12, color: "#8A90A6" }}>{m.caption}</div>
                   </div>
                 ) : (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
-                    {m.content}
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "78%", display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ background: m.role === "user" ? "#C4402B" : "#1E2230", color: m.role === "user" ? "#FBF3EC" : "#F2EFE9", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", fontSize: 14.5, lineHeight: 1.5, whiteSpace: "pre-wrap", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}>
+                      {m.content}
+                    </div>
+                    {m.role === "assistant" && (
+                      <div style={{ display: "flex", gap: 10, alignSelf: "flex-start" }}>
+                        <button onClick={() => speakText(m.content, i)} disabled={speakingIndex !== null} style={{ background: "none", border: "none", color: speakingIndex === i ? "#E8B84B" : "#8A90A6", fontSize: 15, cursor: speakingIndex !== null ? "default" : "pointer", padding: "2px 4px" }}>
+                          {speakingIndex === i ? "🔊 угулуп жатат..." : "🔈 угуу"}
+                        </button>
+                        <button onClick={() => downloadMessage(m.content)} title="Word файл кылып сактоо" style={{ background: "none", border: "none", color: "#8A90A6", fontSize: 15, cursor: "pointer", padding: "2px 4px" }}>
+                          📄 сактоо
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )
               )}
@@ -510,14 +911,21 @@ function App() {
 
             <div style={{ padding: "14px 16px 18px", borderTop: "1px solid #23283A", background: "#171B27", display: "flex", gap: 10, alignItems: "flex-end" }}>
               <input ref={fileInputRef} type="file" accept=".pdf,.zip,image/jpeg,image/png,image/webp,application/pdf,application/zip,application/x-zip-compressed" onChange={handleFileChange} style={{ display: "none" }} />
+              <input ref={editImageInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={handleEditImageChange} style={{ display: "none" }} />
               {mode === "chat" && (
                 <button onClick={handleFilePick} disabled={fileLoading || loading} title="Файл жүктөө (PDF, сүрөт, ZIP)" style={{ background: "#1E2230", color: "#8A90A6", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 13px", fontSize: 16, fontFamily: "inherit", cursor: fileLoading || loading ? "default" : "pointer", flexShrink: 0 }}>📎</button>
               )}
-              <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш)" : "Суроонузду кыргызча жазыңыз..."} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
+              {mode === "image" && (
+                <button onClick={handleEditImagePick} disabled={editImageLoading} title="Сүрөт жүктөп түзөтүү" style={{ background: "#1E2230", color: "#8A90A6", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 13px", fontSize: 16, fontFamily: "inherit", cursor: editImageLoading ? "default" : "pointer", flexShrink: 0 }}>📸</button>
+              )}
+              <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={mode === "image" ? "Кандай сүрөт тартылсын? (мис: асман, тоолор, күн батыш) же 📸 басып сүрөт жүктөп түзөтүңүз" : "Суроонузду кыргызча жазыңыз... (илим, тарых, тиричилик — баары)"} rows={1} style={{ flex: 1, resize: "none", background: "#1E2230", border: "1px solid #2A2F42", borderRadius: 12, padding: "11px 14px", color: "#F2EFE9", fontSize: 14.5, fontFamily: "inherit", maxHeight: 120 }} />
               <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: loading || !input.trim() ? "#3A3F52" : "#C4402B", color: "#FBF3EC", border: "none", borderRadius: 12, padding: "12px 18px", fontSize: 14, fontWeight: 600, fontFamily: "inherit", cursor: loading || !input.trim() ? "default" : "pointer", transition: "background 0.15s" }}>Жиберүү</button>
             </div>
             {fileLoading && (
               <div style={{ padding: "0 16px 10px", fontSize: 12.5, color: "#E8B84B", background: "#171B27" }}>📎 Файл талданып жатат...</div>
+            )}
+            {editImageLoading && (
+              <div style={{ padding: "0 16px 10px", fontSize: 12.5, color: "#E8B84B", background: "#171B27" }}>📸 Сүрөт түзөтүлүп жатат...</div>
             )}
           </>
         )}
