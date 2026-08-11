@@ -27,6 +27,12 @@ if (missing.length > 0) {
 }
 
 const app = express();
+
+// Railway (жана башка прокси артында иштеген платформалар) X-Forwarded-For
+// header'ын кошот. Express'ке прокиге ишенүүгө уруксат бербесек,
+// express-rate-limit катага учурап, кээ бир сурамдардын жообу үзүлүп калат.
+app.set("trust proxy", 1);
+
 app.use(express.json({ limit: "20mb" }));
 app.use(cookieParser());
 
@@ -123,9 +129,6 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "messages талаасы керек" });
     }
 
-    // Gemini чат-тарых форматына айландырабыз: { role, parts:[{text}] }
-    // Gemini "system" ролун колдоого албайт, ошондуктан system prompt'ту
-    // systemInstruction талаасы аркылуу өзүнчө жиберебиз.
     const geminiContents = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: m.content }],
@@ -299,7 +302,6 @@ app.post("/api/speak", async (req, res) => {
       return res.status(400).json({ error: "text талаасы керек" });
     }
 
-    // Үн окуу — чат менен бир эле лимитти колдонот (өзүнчө эсептегич жок)
     const check = checkAndIncrement(req.userId, "chat");
     if (!check.allowed) {
       return res.status(429).json({
@@ -308,7 +310,6 @@ app.post("/api/speak", async (req, res) => {
       });
     }
 
-    // Узун тексттерди кыскартабыз — TTS моделдери өтө узун киргизүүнү жактырбайт
     const trimmedText = text.length > 3000 ? text.slice(0, 3000) : text;
 
     const response = await fetch(
@@ -344,7 +345,6 @@ app.post("/api/speak", async (req, res) => {
       return res.status(502).json({ error: "Үн кайтарылган жок" });
     }
 
-    // Фронтенд 24000 Hz, 16-bit, моно PCM күтөт (pcmToWavBlob функциясы)
     res.json({ audioBase64: part.inlineData.data, usage: check });
   } catch (err) {
     console.error(err);
@@ -445,7 +445,6 @@ app.post("/api/analyze-file", async (req, res) => {
         },
       ];
     } else {
-      // PDF же сүрөт — Gemini'ге түз мултимодалдык бөлүк катары жиберебиз
       geminiContents = [
         {
           role: "user",
@@ -514,7 +513,6 @@ async function generateImageDataUrl(prompt) {
 }
 
 // --- Видео сахналары: ырды сахналарга бөлүп, ар бирине сүрөт тартат ---
-// Клиент (браузер) бул сахналарды алып, canvas+MediaRecorder менен видеого айландырат.
 app.post("/api/video-scenes", async (req, res) => {
   try {
     const { lyrics } = req.body;
@@ -533,11 +531,6 @@ app.post("/api/video-scenes", async (req, res) => {
       });
     }
 
-    // ЭСКЕРТҮҮ: бул бөлүк сиздин чыныгы server.js'иңизде КАНДАЙ болгонун так билбейм —
-    // жиберилген файл ушул жерден кийин үзүлүп калган. Төмөнкү код — сиздин
-    // стилиңизге (system prompt, error форматы, usage) дал келтирилген БОЛЖОЛДУУ версия.
-    // Сураныч, чыныгы GitHub'догу файлыңыз менен салыштырып көрүңүз.
-
     const lines = lyrics
       .split("\n")
       .map((l) => l.trim())
@@ -555,7 +548,6 @@ app.post("/api/video-scenes", async (req, res) => {
         scenes.push({ lyricLine: line, imageDataUrl });
       } catch (e) {
         console.error("Сахна сүрөтүн тартуу катасы:", e.message);
-        // Бир сахна ишке ашпай калса, калгандары менен улантабыз
       }
     }
 
@@ -613,3 +605,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Тундук сервери ${PORT}-портто иштеп жатат`);
 });
+  
