@@ -1,0 +1,38 @@
+{
+  "name": "Тундук — Кыргызча AI жардамчы",
+  "short_name": "Тундук",
+  "description": "Кыргызча AI жардамчы — чат, сүрөт жана видео түзүү",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14171F",
+  "theme_color": "#14171F",
+  "lang": "ky",
+  "icons": [
+    {
+      "src": "/tunduk-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/tunduk-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/tunduk-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/tunduk-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
