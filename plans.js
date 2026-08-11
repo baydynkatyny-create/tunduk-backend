@@ -5,7 +5,7 @@
 export const PLANS = {
   free: {
     label: "Бекер",
-    chatPerDay: 20,
+    chatPerDay: 1000
     imagesPerDay: 3,
     videosPerDay: 1,
     priceSom: 0,
