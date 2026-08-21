@@ -145,7 +145,7 @@ app.post("/api/chat", async (req, res) => {
         body: JSON.stringify({
           contents: geminiContents,
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          generationConfig: { maxOutputTokens: 1500 },
+          generationConfig: { maxOutputTokens: 8000 },
         }),
       }
     );
