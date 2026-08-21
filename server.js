@@ -467,7 +467,7 @@ app.post("/api/analyze-file", async (req, res) => {
         body: JSON.stringify({
           contents: geminiContents,
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          generationConfig: { maxOutputTokens: 1800 },
+          generationConfig: { maxOutputTokens:8000 },
         }),
       }
     );
