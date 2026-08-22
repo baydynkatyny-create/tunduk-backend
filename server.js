@@ -1,0 +1,844 @@
+import AdmZip from "adm-zip";
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
+import crypto from "crypto";
+import rateLimit from "express-rate-limit";
+import { readFileSync, existsSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { checkAndIncrement, getUsage, setTier } from "./store.js";
+import { PLANS } from "./plans.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+dotenv.config();
+
+// --- Керектүү ачкычтар барбы, серверди баштаардан текшеребиз ---
+const REQUIRED_ENV = ["GEMINI_API_KEY", "ADMIN_KEY"];
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length > 0) {
+  console.error(
+    `КАТА: .env файлында бул талаалар жок же бош: ${missing.join(", ")}\n` +
+      `Сервер алардын баарысыз коопсуз иштебейт — .env.example'ди караңыз.`
+  );
+  process.exit(1);
+}
+
+// --- Gemini API ачкычтары: квота бүткөндө автоматтык түрдө кийинкисине которулуу үчүн ---
+// .env файлында GEMINI_API_KEY (милдеттүү), GEMINI_API_KEY_2 жана GEMINI_API_KEY_3 (каалосу боюнча) кошсоңуз болот.
+const GEMINI_API_KEYS = [
+  process.env.GEMINI_API_KEY,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3,
+].filter(Boolean);
+
+console.log(`Gemini ачкычтары жүктөлдү: ${GEMINI_API_KEYS.length} даана`);
+
+let activeGeminiKeyIndex = 0;
+
+// --- Gemini'ге сурам жиберүүчү жалпы жардамчы функция ---
+// Учурдагы ачкыч квотага жетсе (429) же кызмат убактылуу жеткиликсиз болсо (503),
+// автоматтык түрдө кийинки ачкычка которулуп, ошол эле сурамды кайра жиберет.
+// Ийгиликтүү болгон ачкыч кийинки чакырууларда да колдонула берет (sticky).
+async function geminiFetch(model, payload) {
+  let lastError;
+  for (let attempt = 0; attempt < GEMINI_API_KEYS.length; attempt++) {
+    const key = GEMINI_API_KEYS[activeGeminiKeyIndex];
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": key,
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (response.ok) {
+      return response.json();
+    }
+
+    const status = response.status;
+    const errText = await response.text();
+    lastError = new Error(`Gemini error (${status}): ${errText}`);
+
+    if (status === 429 || status === 503) {
+      const nextIndex = (activeGeminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+      console.warn(
+        `Gemini ачкыч #${activeGeminiKeyIndex + 1} квотага жетти (${status}). ` +
+          (GEMINI_API_KEYS.length > 1
+            ? `Ачкыч #${nextIndex + 1}гө которулду.`
+            : `Бирок башка ачкыч жок.`)
+      );
+      activeGeminiKeyIndex = nextIndex;
+      continue; // кийинки ачкыч менен кайра аракет кыл
+    }
+
+    // Башка типтеги ката (400, 401, 403 ж.б.) — ачкыч которуу жардам бербейт, дароо токтотобуз
+    throw lastError;
+  }
+
+  throw lastError || new Error("Бардык Gemini ачкычтары квотага жетти");
+}
+
+const app = express();
+
+// Railway (жана башка прокси артында иштеген платформалар) X-Forwarded-For
+// header'ын кошот. Express'ке прокиге ишенүүгө уруксат бербесек,
+// express-rate-limit катага учурап, кээ бир сурамдардын жообу үзүлүп калат.
+app.set("trust proxy", 1);
+
+app.use(express.json({ limit: "20mb" }));
+app.use(cookieParser());
+
+// --- Фронтенд файлдарын (index.html, tunduk-logo.png ж.б.) тейлөө ---
+// ЭСКЕРТҮҮ: index.html, tunduk-logo.png ж.б. "public" папкасында жатат,
+// ошондуктан __dirname эмес, "public" папкасын көрсөтүү керек.
+app.use(express.static(path.join(__dirname, "public")));
+
+const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+app.use(
+  cors({
+    origin: allowedOrigin === "*" ? true : allowedOrigin,
+    credentials: true,
+  })
+);
+
+// IP-негизделген коргоо — экинчи катмар, cookie тазаланса дагы толук чектелбесин үчүн
+const ipGuard = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: "Өтө көп суроо. Бир аздан кийин кайра аракет кылыңыз." },
+});
+
+const SYSTEM_PROMPT = `Сен "Тундук" деген кыргызча AI жардамчысың. Сен ар дайым таза, табигый кыргыз тилинде жооп бересиң (орусча же англисче сөздөрдү аралаштырбай, зарыл болгон техникалык терминдерден башка). Сен сылык, так, пайдалуу жана достук маанайда жооп бересиң. Кыргыз маданиятын, каада-салтын жана контекстти жакшы билесиң.
+
+Сен илим, тарых, технология, медицина, математика жана башка бардык тармактарда терең билимге ээсиң. Ар бир суроого толук, так жана канааттандырарлык жооп бер — жооп бербей коюу же жарым-жартылай жооп берүү орунсуз. Эгер суроо учурдагы окуяларга, жаңылыктарга же өзгөрүлмө маалыматка байланыштуу болсо, издөө куралын колдонуп, эң азыркы жана так маалыматты тап. Так эмес нерсени так деп көрсөтпө — эгер бир нерсени билбесең же так эмес болсо, ошону ачык айт.
+
+Сен Ислам дини, анын негиздери, тарыхы жана Куран Карим боюнча да терең билимге ээсиң. Дин боюнча суроолорго сылык, урматтоо менен, так жана негиздүү жооп бер. Куран аяттарын айткан учурда, аяттын сүрөсүн жана номерин так көрсөт. Диний маселелерде ар кандай мазхабдардын (фикх мектептеринин) көз караштарын калыс түрдө сунуштап, өзүңдүн бир жактуу пикириңди таңуулаба.
+
+Сен ошондой эле программалоо жана жасалма интеллект боюнча толук кандуу мугалимсиң (үйрөтүүчүсүң). Бул тармакта сенин милдетиң:
+- Программалоо тилдерин (JavaScript, Python, Java, C++, C#, Go, Rust, PHP ж.б.) баштапкы деңгээлден профессионалдык деңгээлге чейин үйрөтүү.
+- Веб-разработка (frontend: HTML/CSS/JS, React, Vue; backend: Node.js, Express, Django, Flask), мобилдик тиркеме түзүү (Android, iOS, Flutter, React Native), маалымат базалары (SQL, MongoDB), API'лер жана архитектура түшүндүрүү.
+- Жасалма интеллект жана машина үйрөнүүнүн негиздерин (нейрон тармактар, deep learning, NLP, компьютердик көрүү) түшүнүктүү тилде, мисалдар менен түшүндүрүү, ошондой эле практикалык колдонмолорду (мисалы Python'до TensorFlow же PyTorch менен) үйрөтүү.
+- DevOps, булуттук технологиялар (AWS, Google Cloud, Docker, Kubernetes) жана желелик коопсуздук негиздерин үйрөтүү.
+
+Үйрөтүүдө колдон бир кадам-кадам (step-by-step) ыкманы колдон: түшүнүктөрдү жөнөкөй мисалдар менен баштап, андан кийин код мисалдарын бер, катаны түшүндүр, эмне үчүн ошондой иштээрин негизде. Колдонуучунун деңгээлине ылайыкташтыр — эгер баштапкы окуучу болсо, жөнөкөй тилде түшүндүр; эгер тажрыйбалуу болсо, тереңирээк техникалык деталдарга өт. Мүмкүн болсо, окуучуга практика жасоо үчүн кичине көнүгүү же тапшырма сунуштап кой.
+
+Сен архитектура жана курулуш тармагында да кеңири билимге ээсиң. Колдонуучу турак үй долбоору жөнүндө сураса (мисалы "2 кабаттуу үй долбоору", "заманбап стилдеги үй" ж.б.), сен:
+- Үйдүн план-схемасын (бөлмөлөрдүн жайгашуусу, аянты) текст түрүндө сүрөттөп бер.
+- Заманбап архитектуралык талаптарга (жарык, желдетүү, изоляция, энергия үнөмдөө) шилтеме кыл.
+- Курулуш чыгымдарын болжолдуу эсепте: материалдар (кирпич/блок, цемент, арматура, чатыр материалы), уста/жумушчу акысы, инженердик иштер (электр, суу түтүк) боюнча бөлүп-бөлүп көрсөт. Эсептөө үчүн үйдүн аянтын (кв.м) жана региондун сура, андан кийин болжолдуу сумманы сом менен көрсөт.
+- Ар дайым эскерт: бул баа — болжолдуу баа, чыныгы баа региондон, материалдын сапатынан жана рынок баасынын өзгөрүшүнөн көз каранды, андыктан так сметаны жергиликтүү устаң же курулуш компаниясынан алуу керек экенин айт.
+- Эгер колдонуучу долбоордун сүрөтүн/визуалын көргүсү келсе, ага "Сүрөт" (🎨) режимине өтүп, каалаган үйдүн сыртын же планын сүрөттөп жазууну сунуштап кой.
+
+Сен эч качан жалаңач, порнографиялык же жыныстык мазмундагы текст, сүрөт же видео түзбөйсүң же талкуулабайсың — колдонуучу кандай гана жол менен сурабасын (уламыш, шылтоо, "билим үчүн" деп жасалма шылтоо менен болсо да). Мындай сурам келгенде сылык түрдө баш тарт жана башка теманы сунуштап кой.`;
+
+// --- Колдонуучу ID: сервер өзү түзөт жана "httpOnly" cookie'ге жазат ---
+function identifyUser(req, res, next) {
+  let userId = req.cookies?.tunduk_uid;
+  if (!userId) {
+    userId = crypto.randomUUID();
+    res.cookie("tunduk_uid", userId, {
+      httpOnly: true,
+      maxAge: 400 * 24 * 60 * 60 * 1000, // ~400 күн — браузерлердин cookie чегине ылайык
+      sameSite: "lax",
+    });
+  }
+  req.userId = userId;
+  next();
+}
+
+app.use(ipGuard);
+app.use(identifyUser);
+
+// --- Жөнөкөй мазмун чыпкасы: бул толук moderation эмес, биринчи коргоо катмары гана ---
+const BLOCKED_PATTERNS = [
+  /\bжалаӊач\b/i,
+  /\bпорно\b/i,
+  /nude/i,
+  /naked/i,
+  /porn/i,
+  /explicit/i,
+  /child.*sex/i,
+  /\bбала.*секс/i,
+];
+
+function isBlockedPrompt(text) {
+  return BLOCKED_PATTERNS.some((re) => re.test(text));
+}
+
+// --- Gemini аркылуу чат жообун алуучу жардамчы функция ---
+async function callGeminiChat(messages) {
+  const geminiContents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+
+  const data = await geminiFetch("gemini-3.6-flash", {
+    contents: geminiContents,
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    generationConfig: { maxOutputTokens: 8000 },
+  });
+
+  return (
+    data.candidates?.[0]?.content?.parts
+      ?.filter((p) => p.text)
+      .map((p) => p.text)
+      .join("\n\n") || "Кечиресиз, жооп ала алган жокмун."
+  );
+}
+
+// --- Groq аркылуу чат жообун алуучу жардамчы функция (Gemini квотага жеткенде колдонулат) ---
+// ЭСКЕРТҮҮ: Иштеши үчүн .env файлына GROQ_API_KEY кошуу керек.
+// Акысыз ачкычты https://console.groq.com/keys дарегинен алса болот.
+async function callGroqChat(messages) {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY коюлган эмес — fallback иштебейт");
+  }
+
+  const groqMessages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...messages.map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: groqMessages,
+      max_tokens: 8000,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error("Groq error: " + errText);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || "Кечиресиз, жооп ала алган жокмун.";
+}
+
+// --- Чат эндпоинти: адегенде Gemini, ал квотага жетсе автоматтык түрдө Groq'го которулат ---
+app.post("/api/chat", async (req, res) => {
+  try {
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чат чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const { messages } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "messages талаасы керек" });
+    }
+
+    let reply;
+    try {
+      reply = await callGeminiChat(messages);
+    } catch (geminiErr) {
+      console.error(geminiErr.message);
+      try {
+        console.log("Gemini иштебей жатат, Groq'го которулду...");
+        reply = await callGroqChat(messages);
+      } catch (groqErr) {
+        console.error(groqErr.message);
+        return res.status(502).json({ error: "AI кызматы жооп берген жок" });
+      }
+    }
+
+    res.json({ reply, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Сүрөт эндпоинти ---
+app.post("/api/image", async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "prompt талаасы керек" });
+    }
+
+    if (isBlockedPrompt(prompt)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет. Башка сурам жазыңыз." });
+    }
+
+    const check = checkAndIncrement(req.userId, "images");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк сүрөт чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    let data;
+    try {
+      data = await geminiFetch("gemini-3.1-flash-image", {
+        contents: [{ parts: [{ text: prompt }] }],
+      });
+    } catch (e) {
+      console.error("Gemini error:", e.message);
+      return res.status(502).json({ error: "Сүрөт кызматы жооп берген жок" });
+    }
+
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Сүрөт кайтарылган жок" });
+    }
+
+    res.json({
+      dataUrl: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+      usage: check,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Сүрөт түзөтүү эндпоинти: колдонуучу жүктөгөн сүрөттү промпт боюнча өзгөртөт ---
+app.post("/api/edit-image", async (req, res) => {
+  try {
+    const { imageBase64, mimeType, prompt } = req.body;
+    if (!imageBase64 || !mimeType) {
+      return res.status(400).json({ error: "imageBase64 жана mimeType талаалары керек" });
+    }
+    if (!mimeType.startsWith("image/")) {
+      return res.status(400).json({ error: "Бул файл сүрөт эмес" });
+    }
+
+    const promptText = (prompt && String(prompt).trim()) || "Бул сүрөттү сулуулант, сапатын жогорулат";
+
+    if (isBlockedPrompt(promptText)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет. Башка сурам жазыңыз." });
+    }
+
+    const check = checkAndIncrement(req.userId, "images");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк сүрөт чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    let data;
+    try {
+      data = await geminiFetch("gemini-3.1-flash-image", {
+        contents: [
+          {
+            parts: [
+              { text: promptText },
+              { inlineData: { mimeType, data: imageBase64 } },
+            ],
+          },
+        ],
+      });
+    } catch (e) {
+      console.error("Gemini error:", e.message);
+      return res.status(502).json({ error: "Сүрөт түзөтүү кызматы жооп берген жок" });
+    }
+
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Түзөтүлгөн сүрөт кайтарылган жок" });
+    }
+
+    res.json({
+      dataUrl: `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`,
+      usage: check,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Үн (текст → сүйлөө) эндпоинти ---
+app.post("/api/speak", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ error: "text талаасы керек" });
+    }
+
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чегиңизге жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const trimmedText = text.length > 3000 ? text.slice(0, 3000) : text;
+
+    let data;
+    try {
+      data = await geminiFetch("gemini-3.1-flash-tts-preview", {
+        contents: [{ parts: [{ text: trimmedText }] }],
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+        },
+      });
+    } catch (e) {
+      console.error("Gemini TTS error:", e.message);
+      return res.status(502).json({ error: "Үн кызматы жооп берген жок" });
+    }
+
+    const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+
+    if (!part) {
+      return res.status(502).json({ error: "Үн кайтарылган жок" });
+    }
+
+    res.json({ audioBase64: part.inlineData.data, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- ZIP ичиндеги текст файлдарды окуп чогултуучу жардамчы функция ---
+const TEXT_EXTENSIONS = [
+  ".js", ".jsx", ".ts", ".tsx", ".json", ".md", ".txt", ".html", ".htm",
+  ".css", ".py", ".java", ".c", ".cpp", ".h", ".cs", ".go", ".rs", ".php",
+  ".rb", ".yml", ".yaml", ".xml", ".sh", ".env.example", ".sql",
+];
+const MAX_ZIP_ENTRIES = 500;
+const MAX_CHARS_PER_FILE = 50000;
+const MAX_TOTAL_CHARS = 500000;
+
+function extractZipText(base64Data) {
+  const buffer = Buffer.from(base64Data, "base64");
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries().filter((e) => !e.isDirectory);
+
+  let combined = "";
+  let fileCount = 0;
+
+  for (const entry of entries) {
+    if (fileCount >= MAX_ZIP_ENTRIES) break;
+    const ext = path.extname(entry.entryName).toLowerCase();
+    if (!TEXT_EXTENSIONS.includes(ext)) continue;
+    if (combined.length >= MAX_TOTAL_CHARS) break;
+
+    try {
+      let content = entry.getData().toString("utf-8");
+      if (content.length > MAX_CHARS_PER_FILE) {
+        content = content.slice(0, MAX_CHARS_PER_FILE) + "\n... (кыскартылды)";
+      }
+      combined += `\n\n--- Файл: ${entry.entryName} ---\n${content}`;
+      fileCount += 1;
+    } catch {
+      // Окулбаган (мис. бинардык) файлдарды өткөрүп жиберебиз
+    }
+  }
+
+  const skippedNote =
+    entries.length > fileCount
+      ? `\n\n(Архивде дагы ${entries.length - fileCount} файл бар, бирок алар көрсөтүлгөн жок — көлөм чегинен улам.)`
+      : "";
+
+  return { text: combined + skippedNote, fileCount, totalEntries: entries.length };
+}
+
+// --- Файл талдоо эндпоинти: PDF, сүрөт же ZIP кабыл алат ---
+app.post("/api/analyze-file", async (req, res) => {
+  try {
+    const { fileBase64, mimeType, fileName } = req.body;
+    if (!fileBase64 || !mimeType) {
+      return res.status(400).json({ error: "fileBase64 жана mimeType талаалары керек" });
+    }
+
+    const check = checkAndIncrement(req.userId, "chat");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк чегиңизге жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const isZip =
+      mimeType === "application/zip" ||
+      mimeType === "application/x-zip-compressed" ||
+      (fileName && fileName.toLowerCase().endsWith(".zip"));
+
+    let geminiContents;
+
+    if (isZip) {
+      let zipResult;
+      try {
+        zipResult = extractZipText(fileBase64);
+      } catch (e) {
+        console.error("ZIP окуу катасы:", e.message);
+        return res.status(400).json({ error: "ZIP файлын ачуу мүмкүн болбоду" });
+      }
+
+      if (!zipResult.text.trim()) {
+        return res.status(400).json({ error: "Архивден окулуучу текст файлдары табылган жок" });
+      }
+
+      geminiContents = [
+        {
+          role: "user",
+          parts: [
+            {
+              text:
+                `Бул "${fileName || "архив"}" деген ZIP файлдын ичиндеги файлдар (${zipResult.fileCount}/${zipResult.totalEntries}). ` +
+                `Мазмунун кыргызча талда: бул эмне долбоор экенин, түзүлүшүн жана негизги бөлүктөрүн түшүндүр.\n${zipResult.text}`,
+            },
+          ],
+        },
+      ];
+    } else {
+      geminiContents = [
+        {
+          role: "user",
+          parts: [
+            { text: "Бул файлды кыргызча талда жана мазмунун түшүндүр." },
+            { inlineData: { mimeType, data: fileBase64 } },
+          ],
+        },
+      ];
+    }
+
+    let data;
+    try {
+      data = await geminiFetch("gemini-3.6-flash", {
+        contents: geminiContents,
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        generationConfig: { maxOutputTokens: 8000 },
+      });
+    } catch (e) {
+      console.error("Gemini error:", e.message);
+      return res.status(502).json({ error: "Файл талдоо кызматы жооп берген жок" });
+    }
+    const reply =
+      data.candidates?.[0]?.content?.parts
+        ?.filter((p) => p.text)
+        .map((p) => p.text)
+        .join("\n\n") || "Кечиресиз, файлды талдай алган жокмун.";
+
+    res.json({ reply, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Gemini аркылуу бир сүрөт жаратуучу жардамчы функция (видео сахналары үчүн) ---
+async function generateImageDataUrl(prompt) {
+  const data = await geminiFetch("gemini-3.1-flash-image", {
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+  const part = data.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+  if (!part) throw new Error("Сүрөт кайтарылган жок");
+  return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+}
+
+// --- Видео сахналары: ырды сахналарга бөлүп, ар бирине сүрөт тартат ---
+app.post("/api/video-scenes", async (req, res) => {
+  try {
+    const { lyrics } = req.body;
+    if (!lyrics || typeof lyrics !== "string" || lyrics.trim().length < 5) {
+      return res.status(400).json({ error: "Ыр тексти керек (лирика)" });
+    }
+    if (isBlockedPrompt(lyrics)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет." });
+    }
+
+    const check = checkAndIncrement(req.userId, "video");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк видео чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const lines = lyrics
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    const MAX_SCENES = 8;
+    const selectedLines = lines.slice(0, MAX_SCENES);
+    const secondsPerScene = 4;
+
+    const scenes = [];
+    for (const line of selectedLines) {
+      const imagePrompt = `Ыр саптарына негизделген атмосфералуу, кинематографиялык сүрөт тарт (вертикалдуу форматта, 9:16): "${line}". Реалисттик, жогорку сапаттагы визуал.`;
+      try {
+        const imageDataUrl = await generateImageDataUrl(imagePrompt);
+        scenes.push({ lyricLine: line, imageDataUrl });
+      } catch (e) {
+        console.error("Сахна сүрөтүн тартуу катасы:", e.message);
+      }
+    }
+
+    if (scenes.length === 0) {
+      return res.status(502).json({ error: "Сахналар түзүлгөн жок, кайра аракет кылыңыз." });
+    }
+
+    res.json({ scenes, secondsPerScene, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Мультик каармандарынын турукту стил сүрөттөмөлөрү (сахна сайын бирдей келип турушу үчүн) ---
+const CARTOON_CHARACTER_STYLES = {
+  wolf_hare: {
+    label: "Карышкыр менен коён",
+    styleTag:
+      "classic hand-drawn Soviet-style chase cartoon, two recurring characters: a lanky, mischievous grey wolf wearing a striped sailor shirt and flared trousers, and a clever, quick little hare in a red vest — same exact character designs in every scene, slapstick comedic chase, exaggerated expressions, vibrant flat colors, dynamic action poses, classic 2D animation cel-shading, no text or watermark",
+  },
+  cat_mouse: {
+    label: "Мышык менен чычкан",
+    styleTag:
+      "classic hand-drawn slapstick chase cartoon, two recurring characters: a clumsy grey house cat and a small, clever brown mouse — same exact character designs in every scene, comedic traps and chases, exaggerated expressions, bright flat colors, dynamic action poses, classic 2D animation cel-shading, no text or watermark",
+  },
+};
+
+// --- Gemini аркылуу окуяны N сахнага бөлүүчү жардамчы функция ---
+async function breakStoryIntoScenes(story, sceneCount) {
+  const prompt =
+    `Төмөнкү окуянын синопсисине негизделип, так ${sceneCount} кыска мультфильм сахнасын түз. ` +
+    `Ар бир сахна — бир гана эрекет/окуя (кубалоо, тузак, күлкүлүү кырсык ж.б.), 1-2 сүйлөм, кыргызча. ` +
+    `Жооп ТАПТАКЫР JSON массив түрүндө гана бол, башка эч нерсе жазба: ["сахна 1 сүрөттөмөсү", "сахна 2 сүрөттөмөсү", ...]\n\n` +
+    `Окуянын синопсиси: ${story}`;
+
+  const data = await geminiFetch("gemini-3.6-flash", {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { maxOutputTokens: 1000 },
+  });
+
+  const raw =
+    data.candidates?.[0]?.content?.parts
+      ?.filter((p) => p.text)
+      .map((p) => p.text)
+      .join("") || "[]";
+
+  const cleaned = raw.replace(/```json|```/g, "").trim();
+  let sceneDescriptions;
+  try {
+    sceneDescriptions = JSON.parse(cleaned);
+  } catch (e) {
+    throw new Error("Сахналарды талдоо катасы: " + e.message);
+  }
+  if (!Array.isArray(sceneDescriptions) || sceneDescriptions.length === 0) {
+    throw new Error("Сахналар түзүлгөн жок");
+  }
+  return sceneDescriptions.slice(0, sceneCount);
+}
+
+// --- Мультик сахналары: окуяну сахналарга бөлүп, ар бирине бирдей стилде сүрөт тартат ---
+app.post("/api/cartoon-scenes", async (req, res) => {
+  try {
+    const { story, characters } = req.body;
+    if (!story || typeof story !== "string" || story.trim().length < 5) {
+      return res.status(400).json({ error: "Окуянын синопсиси керек" });
+    }
+    if (isBlockedPrompt(story)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет." });
+    }
+
+    const charKey = CARTOON_CHARACTER_STYLES[characters] ? characters : "wolf_hare";
+    const charStyle = CARTOON_CHARACTER_STYLES[charKey];
+
+    const check = checkAndIncrement(req.userId, "video");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк видео чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    const MAX_SCENES = 8;
+    const secondsPerScene = 4;
+
+    let sceneDescriptions;
+    try {
+      sceneDescriptions = await breakStoryIntoScenes(story, MAX_SCENES);
+    } catch (e) {
+      console.error("Сахналарга бөлүү катасы:", e.message);
+      return res.status(502).json({ error: "Окуяны сахналарга бөлүү мүмкүн болбоду, кайра аракет кылыңыз." });
+    }
+
+    const scenes = [];
+    for (const desc of sceneDescriptions) {
+      const imagePrompt = `${charStyle.styleTag}. Scene: ${desc}. Vertical format 9:16, high quality animation frame.`;
+      try {
+        const imageDataUrl = await generateImageDataUrl(imagePrompt);
+        scenes.push({ lyricLine: desc, imageDataUrl });
+      } catch (e) {
+        console.error("Мультик сахна сүрөтүн тартуу катасы:", e.message);
+      }
+    }
+
+    if (scenes.length === 0) {
+      return res.status(502).json({ error: "Сахналар түзүлгөн жок, кайра аракет кылыңыз." });
+    }
+
+    res.json({ scenes, secondsPerScene, characterLabel: charStyle.label, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Hugging Face акысыз Inference API аркылуу кыска видео-клип жаратуучу функция ---
+// ЭСКЕРТҮҮ: Иштеши үчүн .env файлына HF_API_KEY кошуу керек.
+// Акысыз ачкычты https://huggingface.co/settings/tokens дарегинен алса болот.
+// Сапат чектелген: 2-4 секунддук, төмөн резолюциядагы клиптер (акысыз моделдин чеги).
+async function generateVideoClip(prompt) {
+  if (!process.env.HF_API_KEY) {
+    throw new Error("HF_API_KEY коюлган эмес — акысыз видео-генерация иштебейт");
+  }
+
+  const model = process.env.HF_VIDEO_MODEL || "damo-vilab/text-to-video-ms-1.7b";
+
+  const response = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HF_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ inputs: prompt }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error("Hugging Face видео катасы: " + errText);
+  }
+
+  const contentType = response.headers.get("content-type") || "video/mp4";
+  const arrayBuffer = await response.arrayBuffer();
+  const base64 = Buffer.from(arrayBuffer).toString("base64");
+  return `data:${contentType};base64,${base64}`;
+}
+
+// --- Мультик видео-клиптери: окуяну сахналарга бөлүп, ар бирине кыска видео жаратат ---
+app.post("/api/cartoon-clips", async (req, res) => {
+  try {
+    if (!process.env.HF_API_KEY) {
+      return res.status(503).json({
+        error: "Акысыз видео-генерация күйгүзүлгөн эмес (HF_API_KEY жок). .env файлына кошуп кайра иштетиңиз.",
+      });
+    }
+
+    const { story, characters } = req.body;
+    if (!story || typeof story !== "string" || story.trim().length < 5) {
+      return res.status(400).json({ error: "Окуянын синопсиси керек" });
+    }
+    if (isBlockedPrompt(story)) {
+      return res.status(400).json({ error: "Бул сурам эрежелерге каршы келет." });
+    }
+
+    const charKey = CARTOON_CHARACTER_STYLES[characters] ? characters : "wolf_hare";
+    const charStyle = CARTOON_CHARACTER_STYLES[charKey];
+
+    const check = checkAndIncrement(req.userId, "video");
+    if (!check.allowed) {
+      return res.status(429).json({
+        error: `Күндүк видео чегине жеттиңиз (${check.limit}). Планыңызды жогорулатсаңыз болот.`,
+        usage: check,
+      });
+    }
+
+    // Клиптер акырын жана кымбат чыгат — сахна санын аз кармайбыз
+    const MAX_CLIPS = 4;
+
+    let sceneDescriptions;
+    try {
+      sceneDescriptions = await breakStoryIntoScenes(story, MAX_CLIPS);
+    } catch (e) {
+      console.error("Сахналарга бөлүү катасы:", e.message);
+      return res.status(502).json({ error: "Окуяны сахналарга бөлүү мүмкүн болбоду, кайра аракет кылыңыз." });
+    }
+
+    const clips = [];
+    for (const desc of sceneDescriptions) {
+      const clipPrompt = `${charStyle.styleTag}. Short action: ${desc}`;
+      try {
+        const videoDataUrl = await generateVideoClip(clipPrompt);
+        clips.push({ lyricLine: desc, videoDataUrl });
+      } catch (e) {
+        console.error("Видео-клип жаратуу катасы:", e.message);
+      }
+    }
+
+    if (clips.length === 0) {
+      return res.status(502).json({
+        error: "Клип түзүлгөн жок. Акысыз модель азыр жеткиликсиз болушу мүмкүн (өтө көп суроо же 'model loading' абалы) — бир аздан кийин кайра аракет кылыңыз.",
+      });
+    }
+
+    res.json({ clips, characterLabel: charStyle.label, usage: check });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Колдонуучунун учурдагы лимиттерин алуу ---
+app.get("/api/usage", (req, res) => {
+  try {
+    res.json(getUsage(req.userId));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- Админ: колдонуучунун планын өзгөртүү (мис. акы төлөнгөн план) ---
+app.post("/api/admin/set-tier", (req, res) => {
+  try {
+    const adminKey = req.headers["x-admin-key"];
+    if (adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ error: "Уруксат жок" });
+    }
+    const { userId, tier } = req.body;
+    if (!userId || !tier || !PLANS[tier]) {
+      return res.status(400).json({ error: "userId жана туура tier керек" });
+    }
+    setTier(userId, tier);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Сервердик ката" });
+  }
+});
+
+// --- SPA fallback: белгисиз GET сурамдарды index.html'ге багыттоо ---
+app.get("*", (req, res) => {
+  const indexPath = path.join(__dirname, "public", "index.html");
+  if (existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send("index.html табылган жок");
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Тундук сервери ${PORT}-портто иштеп жатат`);
+});
