@@ -40,7 +40,12 @@
 const { useState, useRef, useEffect } = React;
 
 const TundukMark = ({ size = 28 }) => (
-  <img src="./tunduk-logo.png" alt="Тундук" style={{ width: size, height: size, objectFit: "contain" }} />
+  <img
+    src="./tunduk-logo.png"
+    alt="Тундук"
+    style={{ width: size, height: size, objectFit: "contain" }}
+    onError={(e) => { e.target.onerror = null; e.target.style.display = "none"; }}
+  />
 );
 
 function App() {
@@ -456,14 +461,22 @@ function App() {
     setError(null);
 
     try {
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(",")[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-
-      const mimeType = file.type || (isZipExt ? "application/zip" : "application/octet-stream");
+      let base64, mimeType;
+      if (file.type.startsWith("image/")) {
+        // Сүрөт болсо, чоӊ файл жаддан ашыкча орун талап кылып, тиркемени
+        // кыйратып коюшу мүмкүн — андыктан алдын ала кысабыз.
+        const resized = await resizeImageForUpload(file);
+        base64 = resized.base64;
+        mimeType = resized.mimeType;
+      } else {
+        base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.split(",")[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        mimeType = file.type || (isZipExt ? "application/zip" : "application/octet-stream");
+      }
 
       const response = await fetch("/api/analyze-file", {
         method: "POST",
@@ -790,6 +803,61 @@ function App() {
     if (editImageInputRef.current) editImageInputRef.current.click();
   };
 
+  // --- Телефондо (өзгөчө webview-тиркемеде) чоӊ сүрөттү өзгөртпөй туруп
+  // base64'кө айландыруу жаддан ашыкча орун талап кылып, тиркемени
+  // кыйратып коюшу мүмкүн (OOM crash). Ошондуктан жөнөтөрдөн мурун
+  // сүрөттү canvas аркылуу кичирейтип, JPEG'ке кысабыз — жад колдонуу
+  // жана жиберилүүчү өлчөм бир нече эсе кичирейет.
+  const resizeImageForUpload = (file, maxDimension = 1600, quality = 0.85) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width >= height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("Сүрөттү кысуу мүмкүн болбоду"));
+              return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => resolve({ base64: reader.result.split(",")[1], mimeType: "image/jpeg" });
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          },
+          "image/jpeg",
+          quality
+        );
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("Сүрөттү ачуу мүмкүн болбоду"));
+      };
+
+      img.src = objectUrl;
+    });
+  };
+
   const handleEditImageChange = async (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
@@ -799,8 +867,8 @@ function App() {
       setError("Сураныч, сүрөт файлын тандаңыз (jpg, png).");
       return;
     }
-    if (file.size > 15 * 1024 * 1024) {
-      setError("Сүрөт өтө чоң (15МБ чегинен ашпасын).");
+    if (file.size > 30 * 1024 * 1024) {
+      setError("Сүрөт өтө чоң (30МБ чегинен ашпасын).");
       return;
     }
 
@@ -812,18 +880,13 @@ function App() {
     setError(null);
 
     try {
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(",")[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      const { base64, mimeType } = await resizeImageForUpload(file);
 
       const response = await fetch("/api/edit-image", {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: base64, mimeType: file.type, prompt }),
+        body: JSON.stringify({ imageBase64: base64, mimeType, prompt }),
       });
 
       const data = await response.json().catch(() => ({}));
