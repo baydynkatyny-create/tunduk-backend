@@ -1,0 +1,23 @@
+{
+  "name": "tunduk-backend",
+  "version": "1.0.0",
+  "description": "Тундук — Кыргыз тилиндеги AI жардамчынын backend бөлүгү",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
+    "adm-zip": "^0.5.10",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "multer": "^2.0.0"
+  }
+}
